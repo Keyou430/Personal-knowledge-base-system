@@ -38,3 +38,6 @@ desktop.ini
 # 临时文件
 *.tmp
 *.log
+
+# 隔离开发工作区
+.worktrees/
