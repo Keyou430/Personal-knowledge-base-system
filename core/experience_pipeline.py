@@ -34,20 +34,28 @@ def prepare_save(
 def save_new_experience(
     store: ExperienceStore,
     draft: ExperienceDraft,
+    *,
+    index: Any | None = None,
 ) -> ExperienceCard:
-    return store.create(draft)
+    card = store.create(draft)
+    _sync_index(store, card, index)
+    return store.get_required(card.id)
 
 
 def merge_experience(
     store: ExperienceStore,
     experience_id: str,
     draft: ExperienceDraft,
+    *,
+    index: Any | None = None,
 ) -> ExperienceCard:
     """Apply the user-approved draft while preserving the old card's tags."""
     existing = store.get_required(experience_id)
     merged_tags = _unique_values([*existing.tags, *draft.tags])
     merged_draft = replace(draft, tags=merged_tags)
-    return store.update(experience_id, merged_draft, change_type="merged")
+    card = store.update(experience_id, merged_draft, change_type="merged")
+    _sync_index(store, card, index)
+    return store.get_required(card.id)
 
 
 def summarize_field_diff(
@@ -76,3 +84,13 @@ def _unique_values(values: Iterable[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+def _sync_index(store: ExperienceStore, card: ExperienceCard, index: Any | None) -> None:
+    if index is None:
+        return
+    try:
+        index.add(card)
+        store.set_index_pending(card.id, False)
+    except Exception:
+        store.set_index_pending(card.id, True)
