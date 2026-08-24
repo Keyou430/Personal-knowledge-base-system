@@ -1,58 +1,40 @@
-# Streamlit Startup Optimization Design
+# Streamlit 启动优化设计
 
-## Goal
+## 目标
 
-Make the application interface available without initializing Chroma or the
-embedding model. The first retrieval or ingestion action may pay the model-load
-cost.
+使应用界面在不初始化 Chroma 向量库或嵌入模型的情况下可用。首次检索或文档入库时可以承担模型加载耗时。
 
-## Scope
+## 范围
 
-- Keep Streamlit, local Chroma persistence, and the current single-user Windows
-  deployment model.
-- Keep the existing upload, browse, domain management, and question-answering
-  capabilities.
-- Do not change models, document formats, data layout, or introduce a service
-  backend.
+- 保持 Streamlit、本地 Chroma 持久化和当前仅供 Windows 本机个人使用的部署方式。
+- 保留文档上传、浏览、领域管理和智能问答能力。
+- 不更换模型、文档格式或数据目录，也不引入独立后端服务。
 
-## Design
+## 设计
 
-The application entry point will import only light UI/configuration code. It
-will render one active view at a time rather than executing all tab bodies on
-every Streamlit rerun.
+应用入口只导入轻量的界面与配置代码。通过一次只渲染一个活动视图的导航方式，替换每次 Streamlit 重运行时都执行全部标签页函数的实现。
 
-The vector-store and document-loader dependencies will be imported by small
-feature helpers only when an operation needs them. The embedding model and
-per-domain vector stores remain process-local cached resources once requested.
+向量库和文档加载器的依赖由小型功能辅助函数在确实需要时导入。嵌入模型和各领域向量库在首次请求后继续作为进程内缓存资源复用。
 
-Document-count statistics will be a deferred UI operation. The normal sidebar
-and initial page do not call `get_domain_stats`; a user action can request the
-count and trigger initialization when needed.
+文档片段数改为延迟加载。常规侧边栏和首页不调用 `get_domain_stats`；用户主动请求统计时才加载并显示。
 
-## Data Flow
+## 数据流
 
-1. `streamlit run app.py` imports and starts the UI without embedding-model
-   construction.
-2. Opening the page renders the selected view and file/domain names only.
-3. Asking a question, adding documents, or explicitly loading statistics calls
-   the corresponding lazy helper.
-4. The helper creates the cached embedding/vector-store resource on its first
-   use; later calls reuse it.
+1. `streamlit run app.py` 只导入并启动界面，不构建嵌入模型。
+2. 打开页面时仅渲染当前视图、领域名称和文件列表。
+3. 提问、上传文档或主动加载统计时，调用对应的延迟辅助函数。
+4. 辅助函数在首次调用时创建并缓存嵌入模型与向量库，之后的调用复用缓存。
 
-## Error Handling
+## 异常处理
 
-- Existing user-facing ingestion and LLM API errors remain intact.
-- Deferred statistics display an explicit unavailable state if the data store
-  cannot be opened.
-- Lazy imports preserve the original exception behavior at the feature boundary.
+- 保持现有的文档入库和 LLM API 面向用户的错误提示。
+- 延迟统计在数据存储无法打开时，明确显示不可用状态。
+- 延迟导入在功能边界保持原有异常语义。
 
-## Verification
+## 验证
 
-- Unit tests prove that importing `app.py` does not import the retriever or
-  document loader.
-- Unit tests prove navigation renders only the selected view.
-- Unit tests prove the sidebar does not request vector-store statistics until
-  explicitly requested.
-- Run the full test suite and compile checks.
-- Start Streamlit and confirm the root page returns HTTP 200 without an
-  embedding-model load message in the startup log.
+- 单元测试证明导入 `app.py` 时不会导入检索器或文档加载器。
+- 单元测试证明导航只渲染被选中的视图。
+- 单元测试证明侧边栏在用户主动请求前不会读取向量库统计。
+- 运行完整测试套件与编译检查。
+- 启动 Streamlit，并确认根页面返回 HTTP 200，且启动日志中没有嵌入模型加载信息。
