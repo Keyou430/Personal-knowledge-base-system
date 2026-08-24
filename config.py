@@ -53,6 +53,7 @@ os.environ["HF_ENDPOINT"] = HF_ENDPOINT
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 RAW_DIR = os.path.join(DATA_DIR, "raw")                # 原始文档存放
 DOMAINS_DIR = os.path.join(DATA_DIR, "domains")        # 多领域知识库根目录
+EXPERIENCE_DB_PATH = os.path.join(DATA_DIR, "experiences.db")
 
 # 支持的文档格式
 SUPPORTED_EXTENSIONS = {
