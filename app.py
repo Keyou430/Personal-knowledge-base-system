@@ -9,6 +9,8 @@ import re
 import sys
 import logging
 import tempfile
+import hashlib
+import json
 from typing import Optional
 
 import streamlit as st
@@ -16,22 +18,22 @@ import streamlit as st
 # 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import RAW_DIR, RETRIEVAL_TOP_K
-from core.loader import load_document
-from core.splitter import split_documents
-from core.retriever import (
-    add_documents,
-    search_with_score,
-    list_domains,
-    create_domain,
-    delete_domain,
-    get_domain_stats,
-    list_domain_files,
+from config import EXPERIENCE_DB_PATH, RAW_DIR, RETRIEVAL_TOP_K
+from core.domains import create_domain, delete_domain, list_domain_files, list_domains
+from core.experience_pipeline import (
+    merge_experience,
+    prepare_save,
+    save_new_experience,
+    summarize_field_diff,
 )
-from core.generator import generate_answer_stream
+from core.experience_store import ExperienceDraft, ExperienceStore
 
 # 对话历史上限条数
 MAX_CHAT_HISTORY = 50
+VIEW_QA = "💬 智能问答"
+VIEW_BROWSE = "📚 文档浏览"
+VIEW_UPLOAD = "📥 文档上传"
+VIEW_EXPERIENCE = "🧠 经验库"
 
 # 日志配置
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -82,9 +84,62 @@ def init_session_state():
         st.session_state.current_domain = "默认"
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
+    if "current_view" not in st.session_state:
+        st.session_state.current_view = VIEW_QA
+    if "experience_drafts" not in st.session_state:
+        st.session_state.experience_drafts = {}
+    if "experience_reviews" not in st.session_state:
+        st.session_state.experience_reviews = {}
 
 
 init_session_state()
+
+
+def make_chat_entry(question: str, answer: str, sources: list[dict]) -> dict:
+    """Build a deterministic conversation record for stable Streamlit keys."""
+    source_payload = json.dumps(sources, ensure_ascii=False, sort_keys=True)
+    stable_id = hashlib.sha256(
+        f"{question}\n{answer}\n{source_payload}".encode("utf-8")
+    ).hexdigest()[:20]
+    return {
+        "id": stable_id,
+        "question": question,
+        "answer": answer,
+        "sources": sources,
+    }
+
+
+def select_experience_sources(sources: list[dict], selections: list[bool]) -> list[dict]:
+    """Keep only citations explicitly selected for cloud drafting."""
+    return [source for source, selected in zip(sources, selections) if selected]
+
+
+def get_experience_store() -> ExperienceStore:
+    """Return the local experience store, initializing SQLite only when needed."""
+    if "experience_store" not in st.session_state:
+        st.session_state.experience_store = ExperienceStore(EXPERIENCE_DB_PATH)
+    return st.session_state.experience_store
+
+
+def get_experience_index():
+    """Create the independent semantic index only when duplicate review needs it."""
+    if "experience_index" not in st.session_state:
+        from core.experience_index import ExperienceIndex
+
+        st.session_state.experience_index = ExperienceIndex(get_experience_store())
+    return st.session_state.experience_index
+
+
+def render_active_view(view: str) -> None:
+    """Render exactly one main view for the current rerun."""
+    if view == VIEW_BROWSE:
+        render_browse_section()
+    elif view == VIEW_UPLOAD:
+        render_upload_section()
+    elif view == VIEW_EXPERIENCE:
+        render_experience_section()
+    else:
+        render_qa_section()
 
 
 # ============================================================
@@ -140,9 +195,14 @@ def render_sidebar():
         # on_change 回调处理用户手动切换；此处覆盖上传后自动切换的场景
         st.session_state.current_domain = current_domain
 
-        # 显示领域统计
-        stats = get_domain_stats(current_domain)
-        st.caption(f"📊 文档片段数: **{stats['document_count']}**")
+        # 统计需要打开向量库，只有用户主动请求时才加载
+        stats_key = f"domain_stats_{current_domain}"
+        if st.button("加载片段统计", key=f"load_{stats_key}", use_container_width=True):
+            from core.retriever import get_domain_stats
+
+            st.session_state[stats_key] = get_domain_stats(current_domain)
+        if stats_key in st.session_state:
+            st.caption(f"📊 文档片段数: **{st.session_state[stats_key]['document_count']}**")
 
         st.divider()
 
@@ -211,6 +271,8 @@ def render_browse_section():
     with col_stat1:
         st.metric("📄 文档数量", len(files))
     with col_stat2:
+        from core.retriever import get_domain_stats
+
         stats = get_domain_stats(current_domain)
         st.metric("🧩 文本片段", stats["document_count"])
     with col_stat3:
@@ -295,6 +357,10 @@ def render_browse_section():
 # ============================================================
 def render_upload_section():
     """渲染文档上传区域"""
+    from core.loader import load_document
+    from core.retriever import add_documents
+    from core.splitter import split_documents
+
     st.header("📥 文档上传")
 
     # 领域选择（与侧边栏同步）
@@ -416,6 +482,9 @@ def render_upload_section():
 # ============================================================
 def render_qa_section():
     """渲染智能问答区域"""
+    from core.generator import generate_answer_stream
+    from core.retriever import search_with_score
+
     st.header("💬 智能问答")
 
     # 问题输入
@@ -466,12 +535,16 @@ def render_qa_section():
             full_answer += chunk
             answer_container.markdown(full_answer)
 
+        sources = [
+            {
+                "source": doc.metadata.get("source", "未知来源"),
+                "excerpt": doc.page_content[:500],
+                "page": doc.metadata.get("page"),
+            }
+            for doc in docs_only
+        ]
         # 保存到对话历史（保留最近 MAX_CHAT_HISTORY 条）
-        st.session_state.chat_history.append({
-            "question": question,
-            "answer": full_answer,
-            "sources": [(doc.metadata.get("source", ""), doc.page_content[:200]) for doc in docs_only],
-        })
+        st.session_state.chat_history.append(make_chat_entry(question, full_answer, sources))
         if len(st.session_state.chat_history) > MAX_CHAT_HISTORY:
             st.session_state.chat_history = st.session_state.chat_history[-MAX_CHAT_HISTORY:]
 
@@ -484,6 +557,243 @@ def render_qa_section():
                 st.write(chat["question"])
             with st.chat_message("assistant"):
                 st.write(chat["answer"])
+                render_experience_capture(chat)
+
+
+def _draft_to_dict(draft: ExperienceDraft) -> dict:
+    return {
+        "title": draft.title,
+        "scenario": draft.scenario,
+        "conclusion": draft.conclusion,
+        "steps": list(draft.steps),
+        "tags": list(draft.tags),
+        "sources": list(draft.sources),
+        "question": draft.question,
+        "answer_excerpt": draft.answer_excerpt,
+    }
+
+
+def _draft_from_dict(values: dict) -> ExperienceDraft:
+    return ExperienceDraft(
+        title=values["title"],
+        scenario=values["scenario"],
+        conclusion=values["conclusion"],
+        steps=list(values["steps"]),
+        tags=list(values["tags"]),
+        sources=list(values["sources"]),
+        question=values.get("question", ""),
+        answer_excerpt=values.get("answer_excerpt", ""),
+    )
+
+
+def render_experience_capture(chat: dict) -> None:
+    """Render capture, edit, duplicate review, and save actions for one answer."""
+    chat_id = chat["id"]
+    drafts = st.session_state.experience_drafts
+    reviews = st.session_state.experience_reviews
+
+    if chat_id not in drafts and chat_id not in reviews:
+        if st.button("🧠 沉淀为经验", key=f"capture_{chat_id}"):
+            st.session_state[f"capture_open_{chat_id}"] = True
+
+    if st.session_state.get(f"capture_open_{chat_id}") and chat_id not in drafts:
+        st.info("将仅发送当前问题、回答和你选定的引用片段到云端进行整理。")
+        source_selections = []
+        sources = chat.get("sources", [])
+        if sources:
+            st.caption("选择需要发送给云端的引用片段（可不选）")
+            for index, source in enumerate(sources):
+                source_name = source.get("source", "未知来源")
+                excerpt = source.get("excerpt", "").replace("\n", " ")[:120]
+                source_selections.append(
+                    st.checkbox(
+                        f"引用 {index + 1} · {source_name}: {excerpt}",
+                        value=False,
+                        key=f"share_source_{chat_id}_{index}",
+                    )
+                )
+        confirmed = st.checkbox(
+            "我确认发送当前问答和引用片段",
+            key=f"share_confirm_{chat_id}",
+        )
+        if st.button(
+            "生成经验草稿",
+            key=f"draft_{chat_id}",
+            disabled=not confirmed,
+            type="primary",
+        ):
+            from core.agent import AgentError, draft_experience
+
+            try:
+                draft = draft_experience(
+                    chat["question"],
+                    chat["answer"],
+                    select_experience_sources(sources, source_selections),
+                )
+                drafts[chat_id] = _draft_to_dict(draft)
+                st.session_state[f"capture_open_{chat_id}"] = False
+                st.rerun()
+            except AgentError as error:
+                st.error(str(error))
+
+    if chat_id in drafts:
+        _render_experience_draft_editor(chat, drafts[chat_id])
+    elif chat_id in reviews:
+        _render_experience_review(chat, reviews[chat_id])
+
+
+def _render_experience_draft_editor(chat: dict, values: dict) -> None:
+    chat_id = chat["id"]
+    st.markdown("**经验草稿（确认后才会保存）**")
+    title = st.text_input("标题", value=values["title"], key=f"title_{chat_id}")
+    scenario = st.text_area("问题 / 场景", value=values["scenario"], key=f"scenario_{chat_id}")
+    conclusion = st.text_area("核心结论", value=values["conclusion"], key=f"conclusion_{chat_id}")
+    steps_text = st.text_area(
+        "操作步骤（每行一步）",
+        value="\n".join(values["steps"]),
+        key=f"steps_{chat_id}",
+    )
+    tags_text = st.text_input(
+        "标签（用逗号分隔）",
+        value="、".join(values["tags"]),
+        key=f"tags_{chat_id}",
+    )
+    st.caption("引用来源")
+    for source in values["sources"]:
+        st.caption(f"- {source.get('source', '未知来源')}: {source.get('excerpt', '')[:200]}")
+
+    if st.button("检查重复并进入审核", key=f"review_{chat_id}", type="primary"):
+        draft = ExperienceDraft(
+            title=title.strip(),
+            scenario=scenario.strip(),
+            conclusion=conclusion.strip(),
+            steps=[item.strip() for item in steps_text.splitlines() if item.strip()],
+            tags=[item.strip() for item in re.split(r"[,，、]", tags_text) if item.strip()],
+            sources=values["sources"],
+            question=values.get("question", chat["question"]),
+            answer_excerpt=values.get("answer_excerpt", chat["answer"][:1000]),
+        )
+        store = get_experience_store()
+        index_available = True
+        try:
+            semantic_matches = get_experience_index().search(
+                "\n".join([draft.title, draft.scenario, draft.conclusion])
+            )
+        except Exception as error:
+            index_available = False
+            semantic_matches = []
+            logger.warning("经验相似检索不可用: %s", type(error).__name__)
+            st.warning("相似经验检查暂不可用；保存后会标记为待重建索引。")
+
+        result = prepare_save(store, draft, semantic_matches=semantic_matches)
+        st.session_state.experience_reviews[chat_id] = {
+            "draft": _draft_to_dict(draft),
+            "kind": result.kind,
+            "match_ids": [match.id for match in result.matches],
+            "index_available": index_available,
+        }
+        del st.session_state.experience_drafts[chat_id]
+        st.rerun()
+
+
+def _render_experience_review(chat: dict, review: dict) -> None:
+    chat_id = chat["id"]
+    draft = _draft_from_dict(review["draft"])
+    store = get_experience_store()
+    matches = [store.get_required(match_id) for match_id in review["match_ids"]]
+    if review["kind"] == "exact_duplicate":
+        st.warning("发现内容完全相同的经验。你可以放弃、仍保存为新经验，或返回修改。")
+    elif matches:
+        st.warning("发现相近经验，请对照后选择处理方式。")
+
+    for index, match in enumerate(matches):
+        st.markdown(f"**相似经验 {index + 1}：{match.title}**")
+        if review["kind"] != "exact_duplicate":
+            diff = summarize_field_diff(match, draft)
+            for field, change in diff.items():
+                if change["changed"]:
+                    st.caption(f"{field}: {change['before']} → {change['after']}")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("保存为新经验", key=f"save_new_{chat_id}", type="primary"):
+            index = _review_index_or_none(review)
+            saved = save_new_experience(store, draft, index=index)
+            if index is None:
+                store.set_index_pending(saved.id, True)
+            _clear_experience_state(chat_id)
+            st.success("经验已保存")
+            st.rerun()
+    with col2:
+        if matches and st.button("合并更新", key=f"merge_{chat_id}"):
+            index = _review_index_or_none(review)
+            saved = merge_experience(store, matches[0].id, draft, index=index)
+            if index is None:
+                store.set_index_pending(saved.id, True)
+            _clear_experience_state(chat_id)
+            st.success("经验已合并更新")
+            st.rerun()
+    with col3:
+        if st.button("放弃", key=f"abandon_{chat_id}"):
+            _clear_experience_state(chat_id)
+            st.rerun()
+
+
+def _clear_experience_state(chat_id: str) -> None:
+    st.session_state.experience_drafts.pop(chat_id, None)
+    st.session_state.experience_reviews.pop(chat_id, None)
+    st.session_state.pop(f"capture_open_{chat_id}", None)
+
+
+def _review_index_or_none(review: dict):
+    if not review.get("index_available", False):
+        return None
+    try:
+        return get_experience_index()
+    except Exception as error:
+        logger.warning("经验索引初始化失败: %s", type(error).__name__)
+        return None
+
+
+def render_experience_section() -> None:
+    """Browse, search, inspect, archive, and restore saved experiences."""
+    st.header("🧠 经验库")
+    store = get_experience_store()
+    if st.button("重建经验索引", key="rebuild_experience_index"):
+        try:
+            get_experience_index().rebuild()
+            st.success("经验索引已重建")
+        except Exception as error:
+            logger.warning("经验索引重建失败: %s", type(error).__name__)
+            st.error("经验索引重建失败，请稍后重试")
+    query = st.text_input("搜索标题、场景、结论或标签", key="experience_search")
+    include_archived = st.checkbox("显示已归档", key="experience_archived")
+    cards = store.search(query, include_archived=include_archived)
+    if not cards:
+        st.info("暂无经验。请在问答结果下点击“沉淀为经验”。")
+        return
+
+    for card in cards:
+        with st.expander(f"{card.title} · {', '.join(card.tags)}"):
+            st.write(card.conclusion)
+            st.caption(f"场景：{card.scenario}")
+            if card.steps:
+                st.markdown("**步骤**")
+                for step in card.steps:
+                    st.write(f"- {step}")
+            pending = "；索引待重建" if card.index_pending else ""
+            st.caption(f"状态：{card.status}；更新时间：{card.updated_at}{pending}")
+            st.caption("来源")
+            for source in store.get_sources(card.id):
+                st.caption(f"- {source['source']}: {source['excerpt'][:200]}")
+            st.caption("版本历史")
+            for version in store.get_versions(card.id):
+                st.caption(f"v{version['version']} · {version['change_type']} · {version['created_at']}")
+            action_key = f"archive_{card.id}" if card.status == "active" else f"restore_{card.id}"
+            action_label = "归档" if card.status == "active" else "恢复"
+            if st.button(action_label, key=action_key):
+                (store.archive if card.status == "active" else store.restore)(card.id)
+                st.rerun()
 
 
 # ============================================================
@@ -494,17 +804,13 @@ def main():
     # 侧边栏
     render_sidebar()
 
-    # 主页面标签页
-    tab1, tab2, tab3 = st.tabs(["💬 智能问答", "📚 文档浏览", "📥 文档上传"])
-
-    with tab1:
-        render_qa_section()
-
-    with tab2:
-        render_browse_section()
-
-    with tab3:
-        render_upload_section()
+    st.session_state.current_view = st.radio(
+        "功能视图",
+        [VIEW_QA, VIEW_BROWSE, VIEW_UPLOAD, VIEW_EXPERIENCE],
+        key="main_view_selector",
+        horizontal=True,
+    )
+    render_active_view(st.session_state.current_view)
 
 
 if __name__ == "__main__":
