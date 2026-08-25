@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 import logging
 from typing import List
 from contextlib import contextmanager
@@ -209,11 +210,53 @@ def load_ppt(file_path: str) -> List[Document]:
 
 
 def load_markdown(file_path: str) -> List[Document]:
-    """加载 Markdown 文件"""
-    from langchain_community.document_loaders import UnstructuredMarkdownLoader
+    """Load Markdown with heading paths instead of flattening the file."""
+    blocks: List[Document] = []
+    heading_path: list[str] = []
+    paragraph_lines: list[str] = []
 
-    loader = UnstructuredMarkdownLoader(file_path)
-    return loader.load()
+    def flush() -> None:
+        if paragraph_lines:
+            text = "\n".join(paragraph_lines).strip()
+            if text:
+                blocks.append(
+                    Document(
+                        page_content=text,
+                        metadata={
+                            "source": file_path,
+                            "block_type": "paragraph",
+                            "heading_path": " / ".join(heading_path),
+                        },
+                    )
+                )
+            paragraph_lines.clear()
+
+    with open(file_path, "r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.rstrip("\r\n")
+            match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+            if match:
+                flush()
+                level = len(match.group(1))
+                heading_path = heading_path[: max(0, level - 1)]
+                heading_path.append(match.group(2).strip())
+                blocks.append(
+                    Document(
+                        page_content=match.group(2).strip(),
+                        metadata={
+                            "source": file_path,
+                            "block_type": "heading",
+                            "heading_level": level,
+                            "heading_path": " / ".join(heading_path),
+                        },
+                    )
+                )
+            elif line.strip():
+                paragraph_lines.append(line)
+            else:
+                flush()
+    flush()
+    return blocks
 
 
 def load_text(file_path: str) -> List[Document]:
@@ -223,17 +266,13 @@ def load_text(file_path: str) -> List[Document]:
     """
     for encoding in ("utf-8", "gbk", "gb2312", "latin-1"):
         try:
-            from langchain_community.document_loaders import TextLoader
-
-            loader = TextLoader(file_path, encoding=encoding)
-            return loader.load()
+            with open(file_path, "r", encoding=encoding) as handle:
+                return [Document(page_content=handle.read(), metadata={"source": file_path})]
         except (UnicodeDecodeError, LookupError):
             continue
     # 所有编码都失败，使用 latin-1（永远不会报错，但可能乱码）
-    from langchain_community.document_loaders import TextLoader
-
-    loader = TextLoader(file_path, encoding="latin-1")
-    return loader.load()
+    with open(file_path, "r", encoding="latin-1") as handle:
+        return [Document(page_content=handle.read(), metadata={"source": file_path})]
 
 
 def load_image(file_path: str) -> List[Document]:

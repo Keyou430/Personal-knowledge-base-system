@@ -89,6 +89,10 @@ class DocumentStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
+    @staticmethod
+    def content_hash(content: str) -> str:
+        return _hash_content(content)
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
@@ -199,16 +203,26 @@ class DocumentStore:
                 "UPDATE documents SET status = 'superseded', updated_at = ? WHERE id = ?",
                 (_now(), document_id),
             )
-        return self._insert_document(
-            domain=domain,
-            name=name,
-            category=category,
-            owner=owner,
-            source=source,
-            content_hash=content_hash,
-            version=resolved_version,
-            chunks=list(chunks),
-        )
+        try:
+            return self._insert_document(
+                domain=domain,
+                name=name,
+                category=category,
+                owner=owner,
+                source=source,
+                content_hash=content_hash,
+                version=resolved_version,
+                chunks=list(chunks),
+            )
+        except Exception:
+            # Projection rows are transactional, and the previous active
+            # version must remain usable when the replacement is malformed.
+            with self._connect() as connection:
+                connection.execute(
+                    "UPDATE documents SET status = 'active', updated_at = ? WHERE id = ?",
+                    (_now(), document_id),
+                )
+            raise
 
     def _insert_document(
         self,
@@ -408,6 +422,25 @@ class DocumentStore:
             )
             if result.rowcount != 1:
                 raise KeyError(f"文档不存在: {document_id}")
+
+    def rebuild_fts(self, domains: Iterable[str] | None = None) -> int:
+        """Recreate the keyword projection from active archive rows."""
+        with self._connect() as connection:
+            connection.execute("DELETE FROM document_chunks_fts")
+            sql = """
+                INSERT INTO document_chunks_fts (chunk_id, domain, document_name, category, section_title, content)
+                SELECT c.id, d.domain, d.name, d.category, c.section_title, c.content
+                FROM document_chunks c JOIN documents d ON d.id = c.document_id
+                WHERE d.status = 'active'
+            """
+            params: list[Any] = []
+            domain_list = list(domains or [])
+            if domain_list:
+                placeholders = ",".join("?" for _ in domain_list)
+                sql += f" AND d.domain IN ({placeholders})"
+                params.extend(domain_list)
+            connection.execute(sql, params)
+            return int(connection.execute("SELECT COUNT(*) FROM document_chunks_fts").fetchone()[0])
 
     @staticmethod
     def _document_from_row(row: sqlite3.Row) -> DocumentRecord:

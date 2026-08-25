@@ -10,15 +10,18 @@ import logging
 from typing import List, Tuple
 
 from langchain_core.documents import Document
-from langchain_chroma import Chroma
-
 from config import DOMAINS_DIR, RETRIEVAL_TOP_K
 from core.embedder import get_embedding_model
 
 logger = logging.getLogger(__name__)
 
 # 领域名 -> Chroma 实例的缓存，避免重复创建
-_vectorstore_cache: dict[str, Chroma] = {}
+_vectorstore_cache: dict[str, object] = {}
+
+
+def stable_chunk_id(document_id: str, version: str, chunk_index: int) -> str:
+    """Return the deterministic vector ID shared by all projections."""
+    return f"{document_id}:{version}:{int(chunk_index)}"
 
 
 def _sanitize_collection_name(domain: str) -> str:
@@ -49,7 +52,7 @@ def _get_domain_path(domain: str) -> str:
     return os.path.join(DOMAINS_DIR, domain, "chroma_db")
 
 
-def get_vectorstore(domain: str = "默认") -> Chroma:
+def get_vectorstore(domain: str = "默认"):
     """
     获取指定领域的向量数据库实例（带缓存）
 
@@ -67,6 +70,8 @@ def get_vectorstore(domain: str = "默认") -> Chroma:
 
     embedding = get_embedding_model()
     collection_name = _sanitize_collection_name(domain)
+
+    from langchain_chroma import Chroma
 
     vectorstore = Chroma(
         persist_directory=persist_directory,
@@ -98,10 +103,31 @@ def add_documents(
         return 0
 
     vectorstore = get_vectorstore(domain)
-    vectorstore.add_documents(documents)
+    ids = []
+    for index, document in enumerate(documents):
+        metadata = document.metadata
+        chunk_id = metadata.get("chunk_id")
+        if not chunk_id and metadata.get("document_id") is not None:
+            chunk_id = stable_chunk_id(
+                str(metadata["document_id"]),
+                str(metadata.get("document_version", "1")),
+                int(metadata.get("chunk_index", index)),
+            )
+        ids.append(chunk_id)
+    if all(ids):
+        vectorstore.add_documents(documents, ids=ids)
+    else:
+        vectorstore.add_documents(documents)
 
     logger.info(f"已向领域 [{domain}] 添加 {len(documents)} 个文档片段")
     return len(documents)
+
+
+def delete_chunk_ids(ids: list[str], domain: str = "默认") -> None:
+    if not ids:
+        return
+    vectorstore = get_vectorstore(domain)
+    vectorstore.delete(ids=ids)
 
 
 def search(
@@ -186,8 +212,6 @@ def create_domain(domain: str) -> bool:
         return False
 
     os.makedirs(domain_path, exist_ok=True)
-    # 初始化空的向量库
-    get_vectorstore(domain)
 
     logger.info(f"已创建领域: {domain}")
     return True

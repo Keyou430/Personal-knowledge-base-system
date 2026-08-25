@@ -5,7 +5,7 @@ RAG 问答生成器
 """
 
 import logging
-from typing import List
+from typing import Any, List
 
 from openai import OpenAI
 from langchain_core.documents import Document
@@ -14,14 +14,17 @@ from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
 logger = logging.getLogger(__name__)
 
+REFUSAL_MESSAGE = "知识库暂无相关内容，请补充或更新相关文档"
+
 # 系统提示词
 SYSTEM_PROMPT = """你是一个知识库助手。你的任务是基于提供的参考资料回答用户问题。
 
 规则：
 1. 只根据参考资料回答，不要编造信息
 2. 如果参考资料中没有相关信息，明确告知用户
-3. 回答末尾标注引用来源（文档路径和相关内容摘要）
-4. 回答要准确、简洁、有条理"""
+3. 先给出简明结论，再给出资料中的依据
+4. 回答末尾必须列出引用，包含文档名称、版本、章节或页码和片段摘要
+5. 回答要准确、简洁、有条理"""
 
 # 引用格式提示
 CITATION_PROMPT = """
@@ -31,7 +34,7 @@ CITATION_PROMPT = """
 """
 
 
-def build_context(documents: List[Document]) -> str:
+def build_context(documents: List[Any]) -> str:
     """
     将检索到的文档构建为上下文文本
 
@@ -46,9 +49,28 @@ def build_context(documents: List[Document]) -> str:
 
     context_parts = []
     for i, doc in enumerate(documents, 1):
-        source = doc.metadata.get("source", "未知来源")
-        content = doc.page_content.strip()
-        context_parts.append(f"【参考资料 {i}】来源: {source}\n{content}")
+        if hasattr(doc, "document_name"):
+            source = doc.document_name
+            version = str(doc.document_version or "未知")
+            section = doc.section_title or "未标注"
+            page = doc.page
+            content = doc.content.strip()
+            keyword_score = getattr(doc, "keyword_score", 0.0)
+            semantic_score = getattr(doc, "semantic_score", 0.0)
+        else:
+            metadata = getattr(doc, "metadata", {})
+            source = metadata.get("document_name") or metadata.get("source", "未知来源")
+            version = str(metadata.get("document_version", "未知"))
+            section = metadata.get("section_title") or metadata.get("heading_path", "未标注")
+            page = metadata.get("page")
+            content = doc.page_content.strip()
+            keyword_score = metadata.get("keyword_score", 0.0)
+            semantic_score = metadata.get("semantic_score", 0.0)
+        page_text = f"页码: {page}" if page is not None else "页码: 未标注"
+        context_parts.append(
+            f"【参考资料 {i}】文档: {source}；版本: {version}；章节: {section}；{page_text}\n"
+            f"召回贡献: 关键词 {keyword_score:.2f} / 语义 {semantic_score:.2f}\n{content}"
+        )
 
     return "\n\n".join(context_parts)
 
@@ -93,6 +115,9 @@ def generate_answer(
     Returns:
         生成的回答文本
     """
+    if not documents:
+        return REFUSAL_MESSAGE
+
     error = _check_api_key()
     if error:
         return error
@@ -139,6 +164,10 @@ def generate_answer_stream(
     Yields:
         生成的文本片段
     """
+    if not documents:
+        yield REFUSAL_MESSAGE
+        return
+
     error = _check_api_key()
     if error:
         yield error

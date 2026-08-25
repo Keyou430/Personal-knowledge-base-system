@@ -18,7 +18,7 @@ import streamlit as st
 # 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import EXPERIENCE_DB_PATH, RAW_DIR, RETRIEVAL_TOP_K
+from config import DOCUMENT_DB_PATH, EXPERIENCE_DB_PATH, RAW_DIR, RETRIEVAL_TOP_K
 from core.domains import create_domain, delete_domain, list_domain_files, list_domains
 from core.experience_pipeline import (
     merge_experience,
@@ -128,6 +128,30 @@ def get_experience_index():
 
         st.session_state.experience_index = ExperienceIndex(get_experience_store())
     return st.session_state.experience_index
+
+
+def get_document_store():
+    """Initialize the document archive only when a document workflow is used."""
+    if "document_store" not in st.session_state:
+        from core.document_store import DocumentStore
+
+        st.session_state.document_store = DocumentStore(DOCUMENT_DB_PATH)
+    return st.session_state.document_store
+
+
+def get_document_retriever(domain: str):
+    """Build a hybrid retriever lazily for the selected domain."""
+    from core.hybrid_retriever import HybridRetriever
+    from core.retriever import get_vectorstore
+
+    def semantic_search(query: str, selected_domain: str, top_k: int):
+        try:
+            return get_vectorstore(selected_domain).similarity_search_with_score(query, k=top_k)
+        except Exception as error:
+            logger.warning("语义索引不可用，继续使用关键词检索: %s", type(error).__name__)
+            return []
+
+    return HybridRetriever(get_document_store(), semantic_search, top_k=RETRIEVAL_TOP_K)
 
 
 def render_active_view(view: str) -> None:
@@ -259,6 +283,41 @@ def render_browse_section():
     current_domain = st.session_state.current_domain
     st.info(f"📂 当前领域: **{current_domain}**")
 
+    st.subheader("🔧 知识索引维护")
+    maintain_col1, maintain_col2 = st.columns(2)
+    with maintain_col1:
+        migrate_clicked = st.button("迁移现有资料", key="migrate_documents")
+    with maintain_col2:
+        rebuild_clicked = st.button("重建知识索引", key="rebuild_document_indexes")
+    if migrate_clicked or rebuild_clicked:
+        from core.migration import migrate_domain, rebuild_indexes
+
+        vectorstore = None
+        try:
+            from core.retriever import get_vectorstore
+
+            vectorstore = get_vectorstore(current_domain)
+        except Exception as error:
+            logger.warning("语义索引初始化失败，将仅维护 SQLite/FTS5: %s", type(error).__name__)
+            st.warning("语义索引暂不可用，已继续维护关键词索引；稍后可重建。")
+        if migrate_clicked:
+            report = migrate_domain(
+                current_domain,
+                raw_dir=os.path.join(RAW_DIR, current_domain),
+                store=get_document_store(),
+                vectorstore=vectorstore,
+            )
+            st.success(f"迁移完成：成功 {report.success_count} 个，失败 {report.failure_count} 个")
+            for failure in report.failures:
+                st.error(f"{failure['file']}: {failure['reason']}")
+        if rebuild_clicked:
+            report = rebuild_indexes(
+                store=get_document_store(), vectorstore=vectorstore, domains=[current_domain]
+            )
+            st.success(f"重建完成：成功 {report.success_count} 个，失败 {report.failure_count} 个")
+            for failure in report.failures:
+                st.error(f"{failure['file']}: {failure['reason']}")
+
     # 获取领域内的文件列表
     files = list_domain_files(current_domain)
 
@@ -357,10 +416,6 @@ def render_browse_section():
 # ============================================================
 def render_upload_section():
     """渲染文档上传区域"""
-    from core.loader import load_document
-    from core.retriever import add_documents
-    from core.splitter import split_documents
-
     st.header("📥 文档上传")
 
     # 领域选择（与侧边栏同步）
@@ -413,6 +468,17 @@ def render_upload_section():
         success_names = []
         fail_details = []  # 存储 (文件名, 失败原因) 元组
 
+        from core.ingestion import ingest_file
+
+        vectorstore = None
+        try:
+            from core.retriever import get_vectorstore
+
+            vectorstore = get_vectorstore(target_domain)
+        except Exception as error:
+            logger.warning("语义索引初始化失败，上传将保留关键词索引: %s", type(error).__name__)
+            st.warning("语义索引暂不可用，文档仍会保存并标记待重建。")
+
         progress = st.progress(0, text="开始处理文档...")
 
         for i, uploaded_file in enumerate(uploaded_files):
@@ -434,26 +500,17 @@ def render_upload_section():
                 with open(raw_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
 
-                # 加载文档
-                docs = load_document(tmp_path)
-                if not docs:
-                    reason = "文档内容为空或格式不支持，无法提取文本"
-                    logger.warning(f"未能从文档中提取内容: {uploaded_file.name}")
-                    fail_details.append((uploaded_file.name, reason))
-                    continue
-
-                # 切分文本
-                chunks = split_documents(docs)
-                if not chunks:
-                    reason = "文档切分后无有效文本片段"
-                    logger.warning(f"文本切分后无内容: {uploaded_file.name}")
-                    fail_details.append((uploaded_file.name, reason))
-                    continue
-
-                # 添加到向量库
-                count = add_documents(chunks, domain=target_domain)
-                total_count += count
+                result = ingest_file(
+                    raw_path,
+                    domain=target_domain,
+                    store=get_document_store(),
+                    vectorstore=vectorstore,
+                    source="upload",
+                )
+                total_count += result.chunk_count
                 success_names.append(uploaded_file.name)
+                if result.index_pending:
+                    fail_details.append((uploaded_file.name, "文档已保存，但索引待重建"))
 
             except Exception as e:
                 reason = f"处理异常: {str(e)}"
@@ -483,7 +540,7 @@ def render_upload_section():
 def render_qa_section():
     """渲染智能问答区域"""
     from core.generator import generate_answer_stream
-    from core.retriever import search_with_score
+    from core.generator import REFUSAL_MESSAGE
 
     st.header("💬 智能问答")
 
@@ -505,43 +562,48 @@ def render_qa_section():
 
     if ask_btn and question.strip():
         with st.spinner("正在检索相关文档..."):
-            # 检索相关文档
-            retrieved_docs = search_with_score(
-                question,
-                domain=st.session_state.current_domain,
-                top_k=RETRIEVAL_TOP_K,
+            retrieved_docs = get_document_retriever(st.session_state.current_domain).search(
+                question, domain=st.session_state.current_domain, top_k=RETRIEVAL_TOP_K
             )
 
         if not retrieved_docs:
-            st.warning("未找到相关文档，请先上传文档到当前领域")
+            st.warning(REFUSAL_MESSAGE)
             return
 
         # 显示检索结果
         with st.expander("📋 检索到的相关文档", expanded=False):
-            for i, (doc, score) in enumerate(retrieved_docs, 1):
-                source = doc.metadata.get("source", "未知来源")
-                st.markdown(f"**[{i}] 来源:** `{os.path.basename(source)}` (相似度: {1 - score:.4f})")
-                st.markdown(f"> {doc.page_content[:300]}...")
+            for i, doc in enumerate(retrieved_docs, 1):
+                location = f"{doc.section_title or '未标注'}"
+                if doc.page is not None:
+                    location += f" / 第 {doc.page} 页"
+                st.markdown(
+                    f"**[{i}] 来源:** `{doc.document_name}` · v{doc.document_version} · {location} "
+                    f"(综合相关度: {doc.score:.3f})"
+                )
+                st.caption(f"关键词 {doc.keyword_score:.3f} · 语义 {doc.semantic_score:.3f}")
+                st.markdown(f"> {doc.content[:300]}...")
                 st.divider()
 
         # 生成回答（流式）
         st.subheader("📝 回答")
-        docs_only = [doc for doc, _ in retrieved_docs]
-
         # 流式输出
         answer_container = st.empty()
         full_answer = ""
-        for chunk in generate_answer_stream(question, docs_only):
+        for chunk in generate_answer_stream(question, retrieved_docs):
             full_answer += chunk
             answer_container.markdown(full_answer)
 
         sources = [
             {
-                "source": doc.metadata.get("source", "未知来源"),
-                "excerpt": doc.page_content[:500],
-                "page": doc.metadata.get("page"),
+                "source": doc.document_name,
+                "document_id": doc.document_id,
+                "version": doc.document_version,
+                "section": doc.section_title,
+                "excerpt": doc.content[:500],
+                "page": doc.page,
+                "score": doc.score,
             }
-            for doc in docs_only
+            for doc in retrieved_docs
         ]
         # 保存到对话历史（保留最近 MAX_CHAT_HISTORY 条）
         st.session_state.chat_history.append(make_chat_entry(question, full_answer, sources))
