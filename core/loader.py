@@ -10,17 +10,13 @@ from typing import List
 from contextlib import contextmanager
 
 from langchain_core.documents import Document
-from langchain_community.document_loaders import (
-    PyPDFLoader,
-    TextLoader,
-    UnstructuredMarkdownLoader,
-)
-
 logger = logging.getLogger(__name__)
 
 
 def load_pdf(file_path: str) -> List[Document]:
     """加载 PDF 文件，扫描件自动走 OCR"""
+    from langchain_community.document_loaders import PyPDFLoader
+
     loader = PyPDFLoader(file_path)
     docs = loader.load()
 
@@ -71,15 +67,70 @@ def _load_pdf_ocr(file_path: str) -> List[Document]:
 
 
 def load_docx(file_path: str) -> List[Document]:
-    """加载 .docx 文件"""
+    """Load DOCX blocks while preserving headings, tables, and source paths."""
     from docx import Document as DocxDocument
 
     doc = DocxDocument(file_path)
-    full_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
-    return [Document(
-        page_content=full_text,
-        metadata={"source": file_path}
-    )]
+    blocks: List[Document] = []
+    heading_path: list[str] = []
+    table_index = 0
+
+    for paragraph in doc.paragraphs:
+        text = paragraph.text.strip()
+        if not text:
+            continue
+        style_name = getattr(paragraph.style, "name", "") or ""
+        if style_name.lower().startswith("heading"):
+            try:
+                level = int(style_name.split()[-1])
+            except (TypeError, ValueError):
+                level = 1
+            heading_path = heading_path[: max(0, level - 1)]
+            heading_path.append(text)
+            blocks.append(
+                Document(
+                    page_content=text,
+                    metadata={
+                        "source": file_path,
+                        "block_type": "heading",
+                        "heading_level": level,
+                        "heading_path": " / ".join(heading_path),
+                    },
+                )
+            )
+            continue
+        blocks.append(
+            Document(
+                page_content=text,
+                metadata={
+                    "source": file_path,
+                    "block_type": "paragraph",
+                    "heading_path": " / ".join(heading_path),
+                },
+            )
+        )
+
+    for table in doc.tables:
+        rows = []
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            if any(cells):
+                rows.append(" | ".join(cells))
+        if rows:
+            blocks.append(
+                Document(
+                    page_content="\n".join(rows),
+                    metadata={
+                        "source": file_path,
+                        "block_type": "table",
+                        "table_index": table_index,
+                        "heading_path": " / ".join(heading_path),
+                    },
+                )
+            )
+            table_index += 1
+
+    return blocks
 
 
 @contextmanager
@@ -159,6 +210,8 @@ def load_ppt(file_path: str) -> List[Document]:
 
 def load_markdown(file_path: str) -> List[Document]:
     """加载 Markdown 文件"""
+    from langchain_community.document_loaders import UnstructuredMarkdownLoader
+
     loader = UnstructuredMarkdownLoader(file_path)
     return loader.load()
 
@@ -170,11 +223,15 @@ def load_text(file_path: str) -> List[Document]:
     """
     for encoding in ("utf-8", "gbk", "gb2312", "latin-1"):
         try:
+            from langchain_community.document_loaders import TextLoader
+
             loader = TextLoader(file_path, encoding=encoding)
             return loader.load()
         except (UnicodeDecodeError, LookupError):
             continue
     # 所有编码都失败，使用 latin-1（永远不会报错，但可能乱码）
+    from langchain_community.document_loaders import TextLoader
+
     loader = TextLoader(file_path, encoding="latin-1")
     return loader.load()
 
