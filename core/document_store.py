@@ -426,7 +426,15 @@ class DocumentStore:
     def rebuild_fts(self, domains: Iterable[str] | None = None) -> int:
         """Recreate the keyword projection from active archive rows."""
         with self._connect() as connection:
-            connection.execute("DELETE FROM document_chunks_fts")
+            domain_list = list(domains or [])
+            if domain_list:
+                placeholders = ",".join("?" for _ in domain_list)
+                connection.execute(
+                    f"DELETE FROM document_chunks_fts WHERE domain IN ({placeholders})",
+                    domain_list,
+                )
+            else:
+                connection.execute("DELETE FROM document_chunks_fts")
             sql = """
                 INSERT INTO document_chunks_fts (chunk_id, domain, document_name, category, section_title, content)
                 SELECT c.id, d.domain, d.name, d.category, c.section_title, c.content
@@ -434,7 +442,6 @@ class DocumentStore:
                 WHERE d.status = 'active'
             """
             params: list[Any] = []
-            domain_list = list(domains or [])
             if domain_list:
                 placeholders = ",".join("?" for _ in domain_list)
                 sql += f" AND d.domain IN ({placeholders})"

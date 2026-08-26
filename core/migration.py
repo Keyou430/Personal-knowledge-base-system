@@ -9,7 +9,6 @@ from typing import Any
 from config import SUPPORTED_EXTENSIONS
 from core.document_store import DocumentStore
 from core.ingestion import IngestionResult, _projection_documents
-from core.retriever import stable_chunk_id
 
 
 @dataclass
@@ -26,7 +25,21 @@ class RebuildReport:
     success_count: int = 0
     failure_count: int = 0
     pending_count: int = 0
+    recovered: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    retry_needed: list[str] = field(default_factory=list)
     failures: list[dict[str, str]] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
+            "pending_count": self.pending_count,
+            "recovered": list(self.recovered),
+            "missing": list(self.missing),
+            "retry_needed": list(self.retry_needed),
+            "failures": list(self.failures),
+        }
 
 
 def migrate_domain(
@@ -80,6 +93,16 @@ def rebuild_indexes(
     for document in documents:
         try:
             chunks = store.get_chunks(document.id)
+            if not chunks:
+                report.missing.append(document.name)
+                report.retry_needed.append(document.name)
+                report.failure_count += 1
+                report.pending_count += 1
+                report.failures.append(
+                    {"file": document.name, "reason": "文档没有可恢复切片"}
+                )
+                store.mark_index_pending(document.id, True)
+                continue
             if vectorstore is not None:
                 vector_documents = _projection_documents(chunks, document)
                 ids = [chunk.id for chunk in chunks]
@@ -88,10 +111,12 @@ def rebuild_indexes(
                 raise RuntimeError("关键词索引自检未命中")
             store.mark_index_pending(document.id, vectorstore is None)
             report.success_count += 1
+            report.recovered.append(document.name)
             report.pending_count += int(vectorstore is None)
         except Exception as error:
             store.mark_index_pending(document.id, True)
             report.pending_count += 1
             report.failure_count += 1
+            report.retry_needed.append(document.name)
             report.failures.append({"file": document.name, "reason": str(error)})
     return report

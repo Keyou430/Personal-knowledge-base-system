@@ -19,6 +19,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import (
+    BACKUP_DIR,
     DOCUMENT_DB_PATH,
     EXPERIENCE_DB_PATH,
     OBSERVABILITY_DB_PATH,
@@ -401,8 +402,79 @@ def render_browse_section():
                 st.error(f"重建失败：{report.failure_count} 个文档")
             if report.pending_count:
                 st.warning(f"需要重试：{report.pending_count} 个文档待重建索引")
+            if report.recovered:
+                st.caption(f"已恢复：{', '.join(report.recovered)}")
+            if report.missing:
+                st.warning(f"缺失切片：{', '.join(report.missing)}")
+            if report.retry_needed:
+                st.warning(f"重试清单：{', '.join(report.retry_needed)}")
             for failure in report.failures:
                 st.error(f"{failure['file']}: {failure['reason']}")
+
+    st.subheader("💾 本地备份与恢复")
+    st.caption("备份包含文档档案、经验卡片、可用的观测记录和原始资料；恢复前会先校验清单与 SHA-256。")
+    backup_col1, backup_col2 = st.columns(2)
+    with backup_col1:
+        backup_path = st.text_input(
+            "备份目录",
+            value=os.path.join(BACKUP_DIR, "latest"),
+            key="backup_path_input",
+        )
+        if st.button("创建并校验备份", key="create_local_backup", use_container_width=True):
+            from core.backup import create_backup
+
+            try:
+                report = create_backup(
+                    backup_path,
+                    document_db_path=DOCUMENT_DB_PATH,
+                    experience_db_path=EXPERIENCE_DB_PATH,
+                    observability_db_path=OBSERVABILITY_DB_PATH,
+                    raw_dir=RAW_DIR,
+                )
+                st.success(f"备份完成并通过校验：{len(report.files)} 个文件")
+                st.caption(f"清单：{report.manifest_path}")
+            except Exception as error:
+                st.error(f"备份失败：{error}")
+    with backup_col2:
+        restore_source = st.text_input(
+            "备份来源目录",
+            value=os.path.join(BACKUP_DIR, "latest"),
+            key="restore_source_input",
+        )
+        restore_destination = st.text_input(
+            "恢复目标目录",
+            value=os.path.join(BACKUP_DIR, "restored"),
+            key="restore_destination_input",
+        )
+        confirm_overwrite = st.checkbox(
+            "确认覆盖非空恢复目标",
+            value=False,
+            key="restore_confirm_overwrite",
+        )
+        if st.button("校验并恢复", key="restore_local_backup", use_container_width=True):
+            from core.backup import restore_backup
+
+            try:
+                report = restore_backup(
+                    restore_source,
+                    restore_destination,
+                    confirm_overwrite=confirm_overwrite,
+                )
+                st.success(f"恢复完成：{len(report.recovered)} 个文件")
+                if report.missing:
+                    st.warning(f"缺失：{', '.join(report.missing)}")
+                if report.retry_needed:
+                    st.warning(f"需要重试：{', '.join(report.retry_needed)}")
+            except Exception as error:
+                st.error(f"恢复未执行：{error}")
+                report = getattr(error, "report", None)
+                if report is not None:
+                    if report.missing:
+                        st.warning(f"缺失：{', '.join(report.missing)}")
+                    if report.integrity_failures:
+                        st.warning(f"完整性失败：{', '.join(report.integrity_failures)}")
+                    if report.retry_needed:
+                        st.warning(f"需要重试：{', '.join(report.retry_needed)}")
 
     from core.observability import document_status_label, get_index_health
 
