@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "thresholds": {
+    "hit_at_k": 1.0,
+    "active_version_hit_rate": 1.0,
+    "refusal_accuracy": 1.0,
+    "citation_coverage": 1.0
+  },
+  "cases": [
+    {"id":"fixture-01","question":"fixture-key-01 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 01"],"expected_pages":[1],"required_terms":["fixture-key-01"],"should_refuse":false},
+    {"id":"fixture-02","question":"fixture-key-02 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 02"],"expected_pages":[2],"required_terms":["fixture-key-02"],"should_refuse":false},
+    {"id":"fixture-03","question":"fixture-key-03 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 03"],"expected_pages":[3],"required_terms":["fixture-key-03"],"should_refuse":false},
+    {"id":"fixture-04","question":"fixture-key-04 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 04"],"expected_pages":[4],"required_terms":["fixture-key-04"],"should_refuse":false},
+    {"id":"fixture-05","question":"fixture-key-05 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 05"],"expected_pages":[5],"required_terms":["fixture-key-05"],"should_refuse":false},
+    {"id":"fixture-06","question":"fixture-key-06 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 06"],"expected_pages":[6],"required_terms":["fixture-key-06"],"should_refuse":false},
+    {"id":"fixture-07","question":"fixture-key-07 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 07"],"expected_pages":[7],"required_terms":["fixture-key-07"],"should_refuse":false},
+    {"id":"fixture-08","question":"fixture-key-08 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 08"],"expected_pages":[8],"required_terms":["fixture-key-08"],"should_refuse":false},
+    {"id":"fixture-09","question":"fixture-key-09 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 09"],"expected_pages":[9],"required_terms":["fixture-key-09"],"should_refuse":false},
+    {"id":"fixture-10","question":"fixture-key-10 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 10"],"expected_pages":[10],"required_terms":["fixture-key-10"],"should_refuse":false},
+    {"id":"fixture-11","question":"fixture-key-11 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 11"],"expected_pages":[11],"required_terms":["fixture-key-11"],"should_refuse":false},
+    {"id":"fixture-12","question":"fixture-key-12 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 12"],"expected_pages":[12],"required_terms":["fixture-key-12"],"should_refuse":false},
+    {"id":"fixture-13","question":"fixture-key-13 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 13"],"expected_pages":[13],"required_terms":["fixture-key-13"],"should_refuse":false},
+    {"id":"fixture-14","question":"fixture-key-14 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 14"],"expected_pages":[14],"required_terms":["fixture-key-14"],"should_refuse":false},
+    {"id":"fixture-15","question":"fixture-key-15 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 15"],"expected_pages":[15],"required_terms":["fixture-key-15"],"should_refuse":false},
+    {"id":"fixture-16","question":"fixture-key-16 的规则是什么？","domain":"fixture","expected_documents":["fixture-policy.md"],"expected_versions":["2"],"expected_sections":["规则 16"],"expected_pages":[16],"required_terms":["fixture-key-16"],"should_refuse":false},
+    {"id":"fixture-refuse-01","question":"private-topic-01 的内容是什么？","domain":"fixture","expected_documents":[],"expected_versions":[],"expected_sections":[],"expected_pages":[],"required_terms":[],"should_refuse":true},
+    {"id":"fixture-refuse-02","question":"private-topic-02 的内容是什么？","domain":"fixture","expected_documents":[],"expected_versions":[],"expected_sections":[],"expected_pages":[],"required_terms":[],"should_refuse":true},
+    {"id":"fixture-refuse-03","question":"private-topic-03 的内容是什么？","domain":"fixture","expected_documents":[],"expected_versions":[],"expected_sections":[],"expected_pages":[],"required_terms":[],"should_refuse":true},
+    {"id":"fixture-refuse-04","question":"private-topic-04 的内容是什么？","domain":"fixture","expected_documents":[],"expected_versions":[],"expected_sections":[],"expected_pages":[],"required_terms":[],"should_refuse":true}
+  ]
+}

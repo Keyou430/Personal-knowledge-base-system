@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "domain": "fixture",
+      "name": "fixture-policy.md",
+      "category": "制度",
+      "version": "1",
+      "content": "旧版本 fixture-key-old，已被新版本替代。",
+      "chunks": [
+        {
+          "id": "fixture-old-1",
+          "content": "旧版本 fixture-key-old，已被新版本替代。",
+          "section_title": "旧版本",
+          "page": 1
+        }
+      ]
+    },
+    {
+      "domain": "fixture",
+      "name": "fixture-policy.md",
+      "category": "制度",
+      "version": "2",
+      "content": "公开合成制度资料。包含 2026 年规则、编号、日期和流程。",
+      "chunks": [
+        {
+          "id": "fixture-policy-01",
+          "content": "fixture-key-01 的规则：申请应在 2026-01-01 前提交。",
+          "section_title": "规则 01",
+          "page": 1
+        },
+        {
+          "id": "fixture-policy-02",
+          "content": "fixture-key-02 的规则：申请应在 2026-01-02 前提交。",
+          "section_title": "规则 02",
+          "page": 2
+        },
+        {
+          "id": "fixture-policy-03",
+          "content": "fixture-key-03 的规则：申请应在 2026-01-03 前提交。",
+          "section_title": "规则 03",
+          "page": 3
+        },
+        {
+          "id": "fixture-policy-04",
+          "content": "fixture-key-04 的规则：申请应在 2026-01-04 前提交。",
+          "section_title": "规则 04",
+          "page": 4
+        },
+        {
+          "id": "fixture-policy-05",
+          "content": "fixture-key-05 的规则：申请应在 2026-01-05 前提交。",
+          "section_title": "规则 05",
+          "page": 5
+        },
+        {
+          "id": "fixture-policy-06",
+          "content": "fixture-key-06 的规则：申请应在 2026-01-06 前提交。",
+          "section_title": "规则 06",
+          "page": 6
+        },
+        {
+          "id": "fixture-policy-07",
+          "content": "fixture-key-07 的规则：申请应在 2026-01-07 前提交。",
+          "section_title": "规则 07",
+          "page": 7
+        },
+        {
+          "id": "fixture-policy-08",
+          "content": "fixture-key-08 的规则：申请应在 2026-01-08 前提交。",
+          "section_title": "规则 08",
+          "page": 8
+        },
+        {
+          "id": "fixture-policy-09",
+          "content": "fixture-key-09 的规则：申请应在 2026-01-09 前提交。",
+          "section_title": "规则 09",
+          "page": 9
+        },
+        {
+          "id": "fixture-policy-10",
+          "content": "fixture-key-10 的规则：申请应在 2026-01-10 前提交。",
+          "section_title": "规则 10",
+          "page": 10
+        },
+        {
+          "id": "fixture-policy-11",
+          "content": "fixture-key-11 的规则：申请应在 2026-01-11 前提交。",
+          "section_title": "规则 11",
+          "page": 11
+        },
+        {
+          "id": "fixture-policy-12",
+          "content": "fixture-key-12 的规则：申请应在 2026-01-12 前提交。",
+          "section_title": "规则 12",
+          "page": 12
+        },
+        {
+          "id": "fixture-policy-13",
+          "content": "fixture-key-13 的规则：申请应在 2026-01-13 前提交。",
+          "section_title": "规则 13",
+          "page": 13
+        },
+        {
+          "id": "fixture-policy-14",
+          "content": "fixture-key-14 的规则：申请应在 2026-01-14 前提交。",
+          "section_title": "规则 14",
+          "page": 14
+        },
+        {
+          "id": "fixture-policy-15",
+          "content": "fixture-key-15 的规则：申请应在 2026-01-15 前提交。",
+          "section_title": "规则 15",
+          "page": 15
+        },
+        {
+          "id": "fixture-policy-16",
+          "content": "fixture-key-16 的规则：申请应在 2026-01-16 前提交。",
+          "section_title": "规则 16",
+          "page": 16
+        }
+      ]
+    }
+  ]
+}

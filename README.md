@@ -58,6 +58,22 @@ streamlit run app.py
 
 历史资料不会在应用启动时自动扫描。请在“文档浏览”页点击“迁移现有资料”建立档案；索引异常时点击“重建知识索引”，原始文件不会被删除。经验沉淀仍是独立的用户确认流程，只发送用户明确选中的引用片段。
 
+## 🧪 离线 RAG 评测
+
+评测只检查本地检索结果，不调用云端 LLM，也不改变问答检索逻辑。公开脱敏 fixture 可重复运行：
+
+```powershell
+python -m core.evaluation --mode fixture --cases tests/fixtures/evaluation_cases.json --corpus tests/fixtures/evaluation_corpus.json
+```
+
+真实问题和基线放在本地 `data/evaluation/`，该目录已加入忽略规则，不会提交或上传。live 模式需要显式指定数据库、领域和基线；只有 `--accept-baseline` 会写入新基线，普通回归运行不会覆盖旧基线：
+
+```powershell
+python -m core.evaluation --mode live --cases data/evaluation/cases.json --database data/documents.db --domain 默认 --baseline data/evaluation/baseline.json
+```
+
+退出码 `0` 表示通过，`1` 表示质量指标低于阈值，`2` 表示案例、索引或基线配置错误，`3` 表示未捕获异常。报告只包含案例 ID、指标和安全失败原因，不输出问题原文、召回片段或密钥。
+
 ## 🧠 经验沉淀流程
 
 1. 在问答结果下点击 **“沉淀为经验”**，确认发送当前问题、回答和选定引用片段。

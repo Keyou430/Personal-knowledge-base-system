@@ -17,6 +17,7 @@ build/
 # 向量数据库（用户数据，不上传）
 data/domains/
 data/raw/
+data/evaluation/
 
 # 虚拟环境
 .venv/
