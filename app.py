@@ -18,7 +18,13 @@ import streamlit as st
 # 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import DOCUMENT_DB_PATH, EXPERIENCE_DB_PATH, RAW_DIR, RETRIEVAL_TOP_K
+from config import (
+    DOCUMENT_DB_PATH,
+    EXPERIENCE_DB_PATH,
+    OBSERVABILITY_DB_PATH,
+    RAW_DIR,
+    RETRIEVAL_TOP_K,
+)
 from core.domains import create_domain, delete_domain, list_domain_files, list_domains
 from core.experience_pipeline import (
     merge_experience,
@@ -137,6 +143,76 @@ def get_document_store():
 
         st.session_state.document_store = DocumentStore(DOCUMENT_DB_PATH)
     return st.session_state.document_store
+
+
+def get_observability_store():
+    """Initialize local query traces only when a question is asked."""
+    if "observability_store" not in st.session_state:
+        from core.observability import QueryTraceStore
+
+        st.session_state.observability_store = QueryTraceStore(OBSERVABILITY_DB_PATH)
+    return st.session_state.observability_store
+
+
+def _source_payload(doc) -> dict:
+    """Build a citation payload with archive and projection provenance."""
+    from core.observability import document_status_label
+
+    record = get_document_store().get(doc.document_id) if doc.document_id else None
+    status = record.status if record else "unknown"
+    index_pending = bool(record.index_pending) if record else False
+    return {
+        "source": doc.document_name,
+        "document_id": doc.document_id,
+        "version": doc.document_version,
+        "section": doc.section_title,
+        "excerpt": doc.content[:500],
+        "page": doc.page,
+        "score": doc.score,
+        "status": status,
+        "status_label": document_status_label(status, index_pending),
+        "index_pending": index_pending,
+    }
+
+
+def render_source_provenance(sources: list[dict]) -> None:
+    """Show citations and their local archive/index state."""
+    if not sources:
+        return
+    st.caption("引用来源与索引状态")
+    for index, source in enumerate(sources, 1):
+        location = source.get("section") or "未标注"
+        if source.get("page") is not None:
+            location += f" / 第 {source['page']} 页"
+        status_label = source.get("status_label", "未知状态")
+        st.markdown(
+            f"**[{index}]** `{source.get('source', '未知来源')}` · "
+            f"v{source.get('version', '未知')} · {location} · {status_label}"
+        )
+        if source.get("index_pending"):
+            st.warning("该文档已保存，但索引待重建；回答引用来自当前可用的本地归档。")
+
+
+def _record_query_trace(
+    *,
+    domain: str,
+    retrieval_count: int,
+    selected_versions: list[tuple[str, str]],
+    refusal_reason: str | None,
+) -> None:
+    """Keep trace initialization and writes outside the answer failure path."""
+    try:
+        from core.observability import record_query_trace_safely
+
+        record_query_trace_safely(
+            get_observability_store(),
+            domain=domain,
+            retrieval_count=retrieval_count,
+            selected_versions=selected_versions,
+            refusal_reason=refusal_reason,
+        )
+    except Exception as error:
+        logger.warning("问答观测初始化失败，已忽略: %s", type(error).__name__)
 
 
 def get_document_retriever(domain: str):
@@ -307,16 +383,36 @@ def render_browse_section():
                 store=get_document_store(),
                 vectorstore=vectorstore,
             )
-            st.success(f"迁移完成：成功 {report.success_count} 个，失败 {report.failure_count} 个")
+            if report.success_count:
+                st.success(f"迁移成功：{report.success_count} 个文件")
+            if report.failure_count:
+                st.error(f"迁移失败：{report.failure_count} 个文件")
+            if report.pending_count:
+                st.warning(f"需要重试：{report.pending_count} 个文件待重建索引")
             for failure in report.failures:
                 st.error(f"{failure['file']}: {failure['reason']}")
         if rebuild_clicked:
             report = rebuild_indexes(
                 store=get_document_store(), vectorstore=vectorstore, domains=[current_domain]
             )
-            st.success(f"重建完成：成功 {report.success_count} 个，失败 {report.failure_count} 个")
+            if report.success_count:
+                st.success(f"重建成功：{report.success_count} 个文档")
+            if report.failure_count:
+                st.error(f"重建失败：{report.failure_count} 个文档")
+            if report.pending_count:
+                st.warning(f"需要重试：{report.pending_count} 个文档待重建索引")
             for failure in report.failures:
                 st.error(f"{failure['file']}: {failure['reason']}")
+
+    from core.observability import document_status_label, get_index_health
+
+    archive_store = get_document_store()
+    health = get_index_health(archive_store, current_domain)
+    st.caption(
+        "索引健康："
+        f"{health['status']} · 当前生效 {health['active']} · 历史版本 {health['superseded']} · "
+        f"失败 {health['failed']} · 待重建 {health['index_pending']}"
+    )
 
     # 获取领域内的文件列表
     files = list_domain_files(current_domain)
@@ -355,6 +451,10 @@ def render_browse_section():
 
     # 文件列表展示
     st.subheader(f"📋 文件列表 ({len(filtered_files)} 个)")
+    records = archive_store.list_documents(domain=current_domain, include_superseded=True)
+    records_by_name = {}
+    for record in records:
+        records_by_name.setdefault(record.name, record)
 
     # 分页设置
     PAGE_SIZE = 10
@@ -387,7 +487,14 @@ def render_browse_section():
             with col1:
                 st.markdown(f"{file_info['icon']} **{file_info['name']}**")
             with col2:
-                st.caption(f"大小: {file_info['size']}")
+                record = records_by_name.get(file_info["name"])
+                status = (
+                    document_status_label(record.status, record.index_pending)
+                    if record
+                    else "未入库"
+                )
+                version = f" · v{record.version}" if record else ""
+                st.caption(f"大小: {file_info['size']} · {status}{version}")
             with col3:
                 # 删除按钮
                 if st.button("🗑️", key=f"del_{start_idx + i}", help=f"删除 {file_info['name']}"):
@@ -466,6 +573,7 @@ def render_upload_section():
 
         total_count = 0
         success_names = []
+        pending_names = []
         fail_details = []  # 存储 (文件名, 失败原因) 元组
 
         from core.ingestion import ingest_file
@@ -510,7 +618,7 @@ def render_upload_section():
                 total_count += result.chunk_count
                 success_names.append(uploaded_file.name)
                 if result.index_pending:
-                    fail_details.append((uploaded_file.name, "文档已保存，但索引待重建"))
+                    pending_names.append(uploaded_file.name)
 
             except Exception as e:
                 reason = f"处理异常: {str(e)}"
@@ -528,8 +636,12 @@ def render_upload_section():
         # 汇总结果
         if success_names:
             st.success(f"✅ 成功处理 **{len(success_names)}** 个文件，共添加 **{total_count}** 个文本片段到领域「{target_domain}」")
+        if pending_names:
+            st.warning(f"🔁 需要重试：{len(pending_names)} 个文件已保存，但索引待重建")
+            for name in pending_names:
+                st.caption(f"待重建：{name}")
         if fail_details:
-            st.warning(f"⚠️ 以下 {len(fail_details)} 个文件处理失败:")
+            st.error(f"❌ 处理失败：{len(fail_details)} 个文件")
             for name, reason in fail_details:
                 st.error(f"❌ **{name}**: {reason}")
 
@@ -567,18 +679,30 @@ def render_qa_section():
             )
 
         if not retrieved_docs:
+            _record_query_trace(
+                domain=st.session_state.current_domain,
+                retrieval_count=0,
+                selected_versions=[],
+                refusal_reason="no_relevant_sources",
+            )
             st.warning(REFUSAL_MESSAGE)
             return
+
+        selected_versions = [
+            (doc.document_name, doc.document_version) for doc in retrieved_docs
+        ]
+        sources = [_source_payload(doc) for doc in retrieved_docs]
 
         # 显示检索结果
         with st.expander("📋 检索到的相关文档", expanded=False):
             for i, doc in enumerate(retrieved_docs, 1):
+                source = sources[i - 1]
                 location = f"{doc.section_title or '未标注'}"
                 if doc.page is not None:
                     location += f" / 第 {doc.page} 页"
                 st.markdown(
                     f"**[{i}] 来源:** `{doc.document_name}` · v{doc.document_version} · {location} "
-                    f"(综合相关度: {doc.score:.3f})"
+                    f"· {source['status_label']} (综合相关度: {doc.score:.3f})"
                 )
                 st.caption(f"关键词 {doc.keyword_score:.3f} · 语义 {doc.semantic_score:.3f}")
                 st.markdown(f"> {doc.content[:300]}...")
@@ -593,18 +717,12 @@ def render_qa_section():
             full_answer += chunk
             answer_container.markdown(full_answer)
 
-        sources = [
-            {
-                "source": doc.document_name,
-                "document_id": doc.document_id,
-                "version": doc.document_version,
-                "section": doc.section_title,
-                "excerpt": doc.content[:500],
-                "page": doc.page,
-                "score": doc.score,
-            }
-            for doc in retrieved_docs
-        ]
+        _record_query_trace(
+            domain=st.session_state.current_domain,
+            retrieval_count=len(retrieved_docs),
+            selected_versions=selected_versions,
+            refusal_reason=None,
+        )
         # 保存到对话历史（保留最近 MAX_CHAT_HISTORY 条）
         st.session_state.chat_history.append(make_chat_entry(question, full_answer, sources))
         if len(st.session_state.chat_history) > MAX_CHAT_HISTORY:
@@ -619,6 +737,7 @@ def render_qa_section():
                 st.write(chat["question"])
             with st.chat_message("assistant"):
                 st.write(chat["answer"])
+                render_source_provenance(chat.get("sources", []))
                 render_experience_capture(chat)
 
 

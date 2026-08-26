@@ -55,6 +55,7 @@ RAW_DIR = os.path.join(DATA_DIR, "raw")                # 原始文档存放
 DOMAINS_DIR = os.path.join(DATA_DIR, "domains")        # 多领域知识库根目录
 EXPERIENCE_DB_PATH = os.path.join(DATA_DIR, "experiences.db")
 DOCUMENT_DB_PATH = os.path.join(DATA_DIR, "documents.db")
+OBSERVABILITY_DB_PATH = os.path.join(DATA_DIR, "observability.db")
 
 # 支持的文档格式
 SUPPORTED_EXTENSIONS = {
