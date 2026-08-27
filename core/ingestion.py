@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,18 @@ class IngestionResult:
     replaced: bool
     index_pending: bool
     self_check_passed: bool
+
+
+def prepare_document(path: str | Path) -> tuple[str, list[ChunkRecord]]:
+    """Load and split a file using the same content model as persistence."""
+    source_path = Path(path)
+    loaded = load_document(str(source_path))
+    if not loaded:
+        raise ValueError("文档内容为空或无法提取")
+    split = [doc for doc in split_documents(loaded) if doc.page_content.strip()]
+    if not split:
+        raise ValueError("文档切分后无有效内容")
+    return "\n".join(doc.page_content for doc in split), _to_chunk_records(split)
 
 
 def _to_chunk_records(documents: list[Document]) -> list[ChunkRecord]:
@@ -71,25 +84,25 @@ def ingest_file(
     category: str = "其他",
     owner: str = "",
     source: str = "upload",
+    version: str | None = None,
+    updated_at: str | None = None,
 ) -> IngestionResult:
     """Load, archive, and project one file; SQLite remains readable on projection failure."""
     source_path = Path(path)
     if not source_path.exists():
         raise FileNotFoundError(f"文件不存在: {source_path}")
 
-    raw_path = store.database_path.parent / "raw" / domain / source_path.name
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    if source_path.resolve() != raw_path.resolve():
-        shutil.copy2(source_path, raw_path)
+    from core.metadata import normalize_metadata
 
-    loaded = load_document(str(source_path))
-    if not loaded:
-        raise ValueError("文档内容为空或无法提取")
-    split = [doc for doc in split_documents(loaded) if doc.page_content.strip()]
-    if not split:
-        raise ValueError("文档切分后无有效内容")
+    metadata = normalize_metadata(
+        category=category,
+        owner=owner,
+        source=source,
+        version=version,
+        updated_at=updated_at,
+    )
 
-    content = "\n".join(doc.page_content for doc in split)
+    content, chunk_records = prepare_document(source_path)
     name = source_path.name
     existing = store.find_active(domain, name)
     content_hash = store.content_hash(content)
@@ -104,28 +117,54 @@ def ingest_file(
         )
 
     old_chunks = store.get_chunks(existing.id) if existing else []
-    chunk_records = _to_chunk_records(split)
     if existing:
         document = store.replace_document(
             existing.id,
             domain=domain,
             name=name,
-            category=category,
-            owner=owner,
-            source=source,
+            category=metadata.category,
+            owner=metadata.owner,
+            source=metadata.source,
             content=content,
             chunks=chunk_records,
+            version=metadata.version,
+            updated_at=metadata.updated_at,
         )
     else:
         document = store.create_document(
             domain=domain,
             name=name,
-            category=category,
-            owner=owner,
-            source=source,
+            category=metadata.category,
+            owner=metadata.owner,
+            source=metadata.source,
             content=content,
             chunks=chunk_records,
+            version=metadata.version,
+            updated_at=metadata.updated_at,
         )
+
+    raw_path = store.database_path.parent / "raw" / domain / source_path.name
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    if source_path.resolve() != raw_path.resolve():
+        with tempfile.NamedTemporaryFile(
+            delete=False, dir=raw_path.parent, prefix=f".{raw_path.name}.", suffix=".tmp"
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+        try:
+            shutil.copy2(source_path, temporary_path)
+            temporary_path.replace(raw_path)
+        except Exception:
+            if existing:
+                store.rollback_replacement(
+                    document.id,
+                    existing.id,
+                    previous_updated_at=existing.updated_at,
+                )
+            else:
+                store.rollback_create(document.id)
+            raise
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
     stored_chunks = store.get_chunks(document.id)
     pending = vectorstore is None

@@ -123,6 +123,22 @@ def _copy_file(source: Path, staging: Path, relative: str) -> None:
     shutil.copy2(source, target)
 
 
+def _publish_staging(staging: Path, destination: Path) -> None:
+    """Publish a completed staging directory, tolerating transient Windows locks."""
+    try:
+        staging.rename(destination)
+    except PermissionError:
+        # File watchers can briefly deny a directory rename on Windows. Copying
+        # keeps the operation recoverable when the atomic publish is unavailable.
+        try:
+            shutil.copytree(staging, destination)
+        except Exception:
+            if destination.exists():
+                shutil.rmtree(destination, ignore_errors=True)
+            raise
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def _source_files(
     *,
     document_db_path: str | Path,
@@ -203,9 +219,9 @@ def create_backup(
             destination.mkdir(parents=True, exist_ok=True)
             for child in staging.iterdir():
                 shutil.move(str(child), str(destination / child.name))
-            staging.rmdir()
+            shutil.rmtree(staging, ignore_errors=True)
         else:
-            staging.rename(destination)
+            _publish_staging(staging, destination)
             staging = None  # type: ignore[assignment]
         return BackupReport(
             backup_path=destination,
@@ -313,7 +329,7 @@ def restore_backup(
             shutil.rmtree(staging, ignore_errors=True)
             staging = None  # type: ignore[assignment]
         else:
-            staging.rename(target)
+            _publish_staging(staging, target)
             staging = None  # type: ignore[assignment]
             recovered = tuple(verification.checked) + (MANIFEST_NAME,)
         return RestoreReport(

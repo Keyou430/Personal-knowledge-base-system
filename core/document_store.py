@@ -158,6 +158,7 @@ class DocumentStore:
         content: str,
         chunks: Iterable[ChunkRecord],
         version: str | None = None,
+        updated_at: str | None = None,
     ) -> DocumentRecord:
         content_hash = _hash_content(content)
         existing = self.find_by_hash(domain, content_hash)
@@ -165,7 +166,7 @@ class DocumentStore:
             return existing
 
         active = self.find_active(domain, name)
-        resolved_version = version or self._next_version(active.version if active else None)
+        resolved_version = version or self.next_version(active.version if active else None)
         return self._insert_document(
             domain=domain,
             name=name,
@@ -175,6 +176,7 @@ class DocumentStore:
             content_hash=content_hash,
             version=resolved_version,
             chunks=list(chunks),
+            updated_at=updated_at,
         )
 
     def replace_document(
@@ -189,6 +191,7 @@ class DocumentStore:
         content: str,
         chunks: Iterable[ChunkRecord],
         version: str | None = None,
+        updated_at: str | None = None,
     ) -> DocumentRecord:
         content_hash = _hash_content(content)
         existing = self.find_by_hash(domain, content_hash)
@@ -197,7 +200,7 @@ class DocumentStore:
         current = self.get(document_id)
         if current is None:
             raise KeyError(f"文档不存在: {document_id}")
-        resolved_version = version or self._next_version(current.version)
+        resolved_version = version or self.next_version(current.version)
         with self._connect() as connection:
             connection.execute(
                 "UPDATE documents SET status = 'superseded', updated_at = ? WHERE id = ?",
@@ -213,6 +216,7 @@ class DocumentStore:
                 content_hash=content_hash,
                 version=resolved_version,
                 chunks=list(chunks),
+                updated_at=updated_at,
             )
         except Exception:
             # Projection rows are transactional, and the previous active
@@ -220,7 +224,7 @@ class DocumentStore:
             with self._connect() as connection:
                 connection.execute(
                     "UPDATE documents SET status = 'active', updated_at = ? WHERE id = ?",
-                    (_now(), document_id),
+                    (current.updated_at, document_id),
                 )
             raise
 
@@ -235,11 +239,12 @@ class DocumentStore:
         content_hash: str,
         version: str,
         chunks: list[ChunkRecord],
+        updated_at: str | None = None,
     ) -> DocumentRecord:
         if not chunks:
             raise ValueError("文档切片不能为空")
         document_id = str(uuid.uuid4())
-        timestamp = _now()
+        timestamp = updated_at or _now()
         total = len(chunks)
         with self._connect() as connection:
             connection.execute(
@@ -301,7 +306,7 @@ class DocumentStore:
         return self.get_required(document_id)
 
     @staticmethod
-    def _next_version(previous: str | None) -> str:
+    def next_version(previous: str | None) -> str:
         if not previous:
             return "1"
         match = re.fullmatch(r"(.*?)(\d+)", str(previous))
@@ -337,6 +342,46 @@ class DocumentStore:
         if document is None:
             raise KeyError(f"文档不存在: {document_id}")
         return document
+
+    def rollback_replacement(
+        self,
+        new_document_id: str,
+        previous_document_id: str,
+        *,
+        previous_updated_at: str,
+    ) -> None:
+        """Remove an uncommitted replacement and reactivate its previous version."""
+        with self._connect() as connection:
+            new_document = connection.execute(
+                "SELECT id FROM documents WHERE id = ? AND status = 'active'",
+                (new_document_id,),
+            ).fetchone()
+            previous_document = connection.execute(
+                "SELECT id FROM documents WHERE id = ? AND status = 'superseded'",
+                (previous_document_id,),
+            ).fetchone()
+            if new_document is None or previous_document is None:
+                raise RuntimeError("无法回滚文档版本替换")
+            connection.execute(
+                "DELETE FROM document_chunks_fts WHERE chunk_id IN "
+                "(SELECT id FROM document_chunks WHERE document_id = ?)",
+                (new_document_id,),
+            )
+            connection.execute("DELETE FROM documents WHERE id = ?", (new_document_id,))
+            connection.execute(
+                "UPDATE documents SET status = 'active', updated_at = ? WHERE id = ?",
+                (previous_updated_at, previous_document_id),
+            )
+
+    def rollback_create(self, document_id: str) -> None:
+        """Remove an uncommitted new document and its keyword projection."""
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM document_chunks_fts WHERE chunk_id IN "
+                "(SELECT id FROM document_chunks WHERE document_id = ?)",
+                (document_id,),
+            )
+            connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
 
     def get_chunks(self, document_id: str, version: str | None = None) -> list[ChunkRecord]:
         sql = "SELECT * FROM document_chunks WHERE document_id = ?"
@@ -417,8 +462,8 @@ class DocumentStore:
     def mark_index_pending(self, document_id: str, pending: bool = True) -> None:
         with self._connect() as connection:
             result = connection.execute(
-                "UPDATE documents SET index_pending = ?, updated_at = ? WHERE id = ?",
-                (int(pending), _now(), document_id),
+                "UPDATE documents SET index_pending = ? WHERE id = ?",
+                (int(pending), document_id),
             )
             if result.rowcount != 1:
                 raise KeyError(f"文档不存在: {document_id}")

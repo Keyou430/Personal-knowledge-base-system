@@ -11,6 +11,8 @@ import logging
 import tempfile
 import hashlib
 import json
+import shutil
+from pathlib import Path
 from typing import Optional
 
 import streamlit as st
@@ -594,10 +596,9 @@ def render_browse_section():
 # 主界面 — 文档上传
 # ============================================================
 def render_upload_section():
-    """渲染文档上传区域"""
+    """Review a local batch before committing accepted documents."""
     st.header("📥 文档上传")
 
-    # 领域选择（与侧边栏同步）
     domains = list_domains()
     if not domains:
         domains = ["默认"]
@@ -611,111 +612,144 @@ def render_upload_section():
         key="upload_domain_selector",
     )
 
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
+    upload_col, preview_col = st.columns([2, 1])
+    with upload_col:
         uploaded_files = st.file_uploader(
             "选择文件（可多选）",
-            type=["pdf", "docx", "doc", "pptx", "ppt", "md", "txt", "jpg", "jpeg", "png", "bmp"],
-            help="支持 PDF、Word、PPT、Markdown、TXT、图片格式，可同时选择多个文件",
+            help="可同时选择多个文件；不支持的格式会在预览中标出，不会入库",
             accept_multiple_files=True,
         )
-
-    with col2:
+    with preview_col:
         st.write("")
         st.write("")
-        process_btn = st.button("📥 处理并入库", use_container_width=True, type="primary", disabled=not uploaded_files)
+        preview_clicked = st.button(
+            "🔎 生成批量预览",
+            use_container_width=True,
+            disabled=not uploaded_files,
+        )
 
-    if uploaded_files and process_btn:
-        # 使用自定义领域名称
+    metadata_col1, metadata_col2, metadata_col3 = st.columns(3)
+    with metadata_col1:
+        category = st.text_input("分类", value="其他", key="batch_category")
+    with metadata_col2:
+        owner = st.text_input("责任人", value="", key="batch_owner")
+    with metadata_col3:
+        source = st.text_input("来源", value="upload", key="batch_source")
+
+    if uploaded_files and preview_clicked:
+        from core.metadata import preview_batch
+
         target_domain = custom_domain.strip() or "默认"
-
-        # 校验领域名称
         error = validate_domain_name(target_domain)
         if error:
             st.error(error)
             return
+        previous_staging = st.session_state.pop("batch_staging_dir", None)
+        if previous_staging:
+            shutil.rmtree(previous_staging, ignore_errors=True)
+        staging_dir = Path(tempfile.mkdtemp(prefix="kb-batch-"))
+        try:
+            paths = []
+            used_names: set[str] = set()
+            for index, uploaded_file in enumerate(uploaded_files):
+                safe_name = Path(uploaded_file.name).name or f"upload-{index}"
+                if safe_name in used_names:
+                    raise ValueError(f"批次内文件名重复: {safe_name}")
+                used_names.add(safe_name)
+                path = staging_dir / safe_name
+                path.write_bytes(uploaded_file.getbuffer())
+                paths.append(path)
+            st.session_state.batch_preview = preview_batch(
+                paths,
+                domain=target_domain,
+                store=get_document_store(),
+                category=category,
+                owner=owner,
+                source=source,
+            )
+            st.session_state.batch_staging_dir = str(staging_dir)
+            st.rerun()
+        except Exception as error:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            st.error(f"预览失败：{error}")
 
-        # 自动创建领域（如果不存在）
-        domains = list_domains()
-        if target_domain not in domains:
-            if not create_domain(target_domain):
-                st.error(f"创建领域「{target_domain}」失败")
-                return
+    preview = st.session_state.get("batch_preview")
+    if preview is None:
+        return
 
-        total_count = 0
-        success_names = []
-        pending_names = []
-        fail_details = []  # 存储 (文件名, 失败原因) 元组
+    st.subheader("批量入库预览")
+    st.caption(
+        f"领域：{preview.domain} · 接受入库：{preview.accepted_count} / {len(preview.items)}；"
+        "预览不会写入数据库。"
+    )
+    for warning in preview.metadata.warnings:
+        st.warning(warning)
+    st.caption(
+        f"分类：{preview.metadata.category} · 责任人：{preview.metadata.owner or '未填写'} · "
+        f"来源：{preview.metadata.source} · 更新时间：{preview.metadata.updated_at}"
+    )
+    action_labels = {
+        "new": "新增",
+        "replace": "替换版本",
+        "duplicate": "重复跳过",
+        "unsupported": "不支持",
+        "invalid": "解析失败",
+        "missing": "文件缺失",
+    }
+    for item in preview.items:
+        version = f" · 拟用 v{item.proposed_version}" if item.proposed_version else ""
+        st.write(
+            f"**{item.name}** · {action_labels.get(item.action, item.action)}{version} · {item.reason}"
+        )
 
-        from core.ingestion import ingest_file
+    confirm_col, cancel_col = st.columns(2)
+    with confirm_col:
+        confirm_clicked = st.button(
+            "✅ 确认并入库",
+            type="primary",
+            use_container_width=True,
+            disabled=preview.accepted_count == 0,
+        )
+    with cancel_col:
+        cancel_clicked = st.button("取消本批次", use_container_width=True)
 
+    if cancel_clicked:
+        staging_dir = st.session_state.pop("batch_staging_dir", None)
+        if staging_dir:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        st.session_state.pop("batch_preview", None)
+        st.rerun()
+
+    if confirm_clicked:
+        from core.metadata import execute_batch
+
+        if preview.domain not in list_domains() and not create_domain(preview.domain):
+            st.error(f"创建领域「{preview.domain}」失败")
+            return
         vectorstore = None
         try:
             from core.retriever import get_vectorstore
 
-            vectorstore = get_vectorstore(target_domain)
+            vectorstore = get_vectorstore(preview.domain)
         except Exception as error:
-            logger.warning("语义索引初始化失败，上传将保留关键词索引: %s", type(error).__name__)
+            logger.warning("语义索引初始化失败，批量入库将保留关键词索引: %s", type(error).__name__)
             st.warning("语义索引暂不可用，文档仍会保存并标记待重建。")
-
-        progress = st.progress(0, text="开始处理文档...")
-
-        for i, uploaded_file in enumerate(uploaded_files):
-            progress.progress(
-                (i) / len(uploaded_files),
-                text=f"正在处理第 {i + 1}/{len(uploaded_files)} 个文件: {uploaded_file.name}",
-            )
-            tmp_path = None
-            try:
-                # 保存上传文件到临时目录
-                ext = os.path.splitext(uploaded_file.name)[1]
-                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                    tmp.write(uploaded_file.getbuffer())
-                    tmp_path = tmp.name
-
-                # 同时保存到 raw 目录
-                raw_path = os.path.join(RAW_DIR, target_domain, uploaded_file.name)
-                os.makedirs(os.path.dirname(raw_path), exist_ok=True)
-                with open(raw_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-
-                result = ingest_file(
-                    raw_path,
-                    domain=target_domain,
-                    store=get_document_store(),
-                    vectorstore=vectorstore,
-                    source="upload",
-                )
-                total_count += result.chunk_count
-                success_names.append(uploaded_file.name)
-                if result.index_pending:
-                    pending_names.append(uploaded_file.name)
-
-            except Exception as e:
-                reason = f"处理异常: {str(e)}"
-                logger.exception(f"文档处理异常: {uploaded_file.name}")
-                fail_details.append((uploaded_file.name, reason))
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-
-        progress.progress(1.0, text="处理完成")
-
-        # 更新当前领域（下一帧侧边栏 selectbox 会自动同步）
-        st.session_state.current_domain = target_domain
-
-        # 汇总结果
-        if success_names:
-            st.success(f"✅ 成功处理 **{len(success_names)}** 个文件，共添加 **{total_count}** 个文本片段到领域「{target_domain}」")
-        if pending_names:
-            st.warning(f"🔁 需要重试：{len(pending_names)} 个文件已保存，但索引待重建")
-            for name in pending_names:
-                st.caption(f"待重建：{name}")
-        if fail_details:
-            st.error(f"❌ 处理失败：{len(fail_details)} 个文件")
-            for name, reason in fail_details:
-                st.error(f"❌ **{name}**: {reason}")
+        report = execute_batch(preview, store=get_document_store(), vectorstore=vectorstore)
+        st.session_state.current_domain = preview.domain
+        if report.successes:
+            st.success(f"成功入库：{len(report.successes)} 个文件")
+        if report.duplicates:
+            st.info(f"重复跳过：{', '.join(report.duplicates)}")
+        if report.pending:
+            st.warning(f"索引待重建：{', '.join(report.pending)}")
+        if report.retry_needed:
+            st.warning(f"需要重试：{', '.join(report.retry_needed)}")
+        for failure in report.failures:
+            st.error(f"{failure['file']}: {failure['reason']}")
+        staging_dir = st.session_state.pop("batch_staging_dir", None)
+        if staging_dir:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        st.session_state.pop("batch_preview", None)
 
 
 # ============================================================

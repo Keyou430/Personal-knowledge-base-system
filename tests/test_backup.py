@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -46,6 +47,30 @@ def test_verified_backup_restores_databases_and_original_materials(tmp_path):
     assert (destination / "experiences.db").read_bytes() == experiences_db.read_bytes()
     assert (destination / "raw" / "policy" / "policy.md").read_text(encoding="utf-8") == "报销流程"
     assert (raw_dir / "policy" / "policy.md").read_text(encoding="utf-8") == "报销流程"
+
+
+def test_restore_falls_back_when_directory_rename_is_denied(tmp_path, monkeypatch):
+    _, raw_dir, documents_db, experiences_db, _ = make_sources(tmp_path)
+    backup_dir = tmp_path / "backup"
+    create_backup(
+        backup_dir,
+        document_db_path=documents_db,
+        experience_db_path=experiences_db,
+        raw_dir=raw_dir,
+    )
+    original_rename = Path.rename
+
+    def deny_restore_rename(path, target):
+        if path.name.startswith(".restored.restore."):
+            raise PermissionError("simulated Windows directory lock")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", deny_restore_rename)
+
+    restored = restore_backup(backup_dir, tmp_path / "restored")
+
+    assert restored.valid is True
+    assert (tmp_path / "restored" / "documents.db").read_bytes() == documents_db.read_bytes()
 
 
 def test_integrity_failure_is_reported_before_existing_data_is_touched(tmp_path):

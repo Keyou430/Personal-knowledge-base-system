@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+
+import core.ingestion as ingestion
 from core.document_store import DocumentStore
 from core.ingestion import ingest_file
 
@@ -62,3 +65,31 @@ def test_ingest_file_keeps_sqlite_record_when_vector_projection_fails(tmp_path):
     assert result.document.status == "active"
     assert result.index_pending is True
     assert store.get(result.document.id).index_pending is True
+
+
+def test_ingest_file_preserves_active_version_and_raw_file_when_raw_copy_fails(
+    tmp_path, monkeypatch
+):
+    store = DocumentStore(tmp_path / "documents.db")
+    first_source = tmp_path / "first" / "制度.md"
+    first_source.parent.mkdir()
+    write_text(first_source, "# 第一版\n旧内容")
+    first = ingest_file(first_source, domain="制度", store=store, vectorstore=FakeVectorStore())
+    raw_path = tmp_path / "raw" / "制度" / "制度.md"
+    replacement = tmp_path / "replacement" / "制度.md"
+    replacement.parent.mkdir()
+    write_text(replacement, "# 第二版\n新内容")
+
+    monkeypatch.setattr(
+        ingestion.shutil,
+        "copy2",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        ingest_file(replacement, domain="制度", store=store, vectorstore=FakeVectorStore())
+
+    assert store.find_active("制度", "制度.md").id == first.document.id
+    assert store.find_active("制度", "制度.md").updated_at == first.document.updated_at
+    assert len(store.list_documents(include_superseded=True)) == 1
+    assert raw_path.read_text(encoding="utf-8") == "# 第一版\n旧内容"
