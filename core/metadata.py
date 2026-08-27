@@ -57,6 +57,15 @@ class BatchPreview:
     def accepted_count(self) -> int:
         return sum(item.accepted for item in self.items)
 
+    def for_retry(self, names: Iterable[str]) -> "BatchPreview":
+        """Return a preview containing only the items that still need work."""
+        retry_names = set(names)
+        return BatchPreview(
+            domain=self.domain,
+            items=tuple(item for item in self.items if item.name in retry_names),
+            metadata=self.metadata,
+        )
+
 
 @dataclass
 class BatchExecutionReport:
@@ -255,14 +264,31 @@ def execute_batch(
 
     report = BatchExecutionReport()
     for item in preview.items:
-        if item.action in {"new", "replace", "duplicate"} and (
-            not item.path.is_file() or _sha256(item.path) != item.content_sha256
-        ):
+        if item.action in {"missing", "unsupported", "invalid"}:
             report.retry_needed.append(item.name)
-            report.failures.append(
-                {"file": item.name, "reason": "文件在预览后发生变化"}
-            )
+            report.failures.append({"file": item.name, "reason": item.reason})
             continue
+        if item.action in {"new", "replace", "duplicate"}:
+            if not item.path.is_file():
+                report.retry_needed.append(item.name)
+                report.failures.append(
+                    {"file": item.name, "reason": "文件在预览后发生变化"}
+                )
+                continue
+            try:
+                current_hash = _sha256(item.path)
+            except OSError as error:
+                report.retry_needed.append(item.name)
+                report.failures.append(
+                    {"file": item.name, "reason": f"文件在预览后无法读取: {error}"}
+                )
+                continue
+            if current_hash != item.content_sha256:
+                report.retry_needed.append(item.name)
+                report.failures.append(
+                    {"file": item.name, "reason": "文件在预览后发生变化"}
+                )
+                continue
         if item.action == "duplicate":
             if item.duplicate_of and item.duplicate_of not in {
                 *report.successes,

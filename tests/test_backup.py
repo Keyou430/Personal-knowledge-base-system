@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,36 @@ def test_restore_falls_back_when_directory_rename_is_denied(tmp_path, monkeypatc
 
     assert restored.valid is True
     assert (tmp_path / "restored" / "documents.db").read_bytes() == documents_db.read_bytes()
+
+
+def test_restore_does_not_delete_destination_when_fallback_copy_fails(tmp_path, monkeypatch):
+    _, raw_dir, documents_db, _, _ = make_sources(tmp_path)
+    backup_dir = tmp_path / "backup"
+    create_backup(
+        backup_dir,
+        document_db_path=documents_db,
+        experience_db_path=tmp_path / "data" / "experiences.db",
+        raw_dir=raw_dir,
+    )
+    original_rename = Path.rename
+
+    def deny_restore_rename(path, target):
+        if path.name.startswith(".restored.restore."):
+            raise PermissionError("simulated Windows directory lock")
+        return original_rename(path, target)
+
+    def fail_after_creating_destination(source, destination, *args, **kwargs):
+        Path(destination).mkdir()
+        (Path(destination) / "sentinel.txt").write_text("keep", encoding="utf-8")
+        raise OSError("simulated copy failure")
+
+    monkeypatch.setattr(Path, "rename", deny_restore_rename)
+    monkeypatch.setattr(shutil, "copytree", fail_after_creating_destination)
+
+    with pytest.raises(OSError, match="simulated copy failure"):
+        restore_backup(backup_dir, tmp_path / "restored")
+
+    assert (tmp_path / "restored" / "sentinel.txt").read_text(encoding="utf-8") == "keep"
 
 
 def test_integrity_failure_is_reported_before_existing_data_is_touched(tmp_path):

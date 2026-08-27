@@ -130,12 +130,7 @@ def _publish_staging(staging: Path, destination: Path) -> None:
     except PermissionError:
         # File watchers can briefly deny a directory rename on Windows. Copying
         # keeps the operation recoverable when the atomic publish is unavailable.
-        try:
-            shutil.copytree(staging, destination)
-        except Exception:
-            if destination.exists():
-                shutil.rmtree(destination, ignore_errors=True)
-            raise
+        shutil.copytree(staging, destination)
         shutil.rmtree(staging, ignore_errors=True)
 
 

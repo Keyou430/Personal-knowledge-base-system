@@ -644,6 +644,8 @@ def render_upload_section():
         if error:
             st.error(error)
             return
+        st.session_state.pop("batch_preview", None)
+        st.session_state.pop("batch_retry_mode", None)
         previous_staging = st.session_state.pop("batch_staging_dir", None)
         if previous_staging:
             shutil.rmtree(previous_staging, ignore_errors=True)
@@ -703,12 +705,13 @@ def render_upload_section():
         )
 
     confirm_col, cancel_col = st.columns(2)
+    retry_mode = bool(st.session_state.get("batch_retry_mode"))
     with confirm_col:
         confirm_clicked = st.button(
-            "✅ 确认并入库",
+            "🔁 重试失败项" if retry_mode else "✅ 确认并入库",
             type="primary",
             use_container_width=True,
-            disabled=preview.accepted_count == 0,
+            disabled=preview.accepted_count == 0 and not retry_mode,
         )
     with cancel_col:
         cancel_clicked = st.button("取消本批次", use_container_width=True)
@@ -718,6 +721,7 @@ def render_upload_section():
         if staging_dir:
             shutil.rmtree(staging_dir, ignore_errors=True)
         st.session_state.pop("batch_preview", None)
+        st.session_state.pop("batch_retry_mode", None)
         st.rerun()
 
     if confirm_clicked:
@@ -746,10 +750,15 @@ def render_upload_section():
             st.warning(f"需要重试：{', '.join(report.retry_needed)}")
         for failure in report.failures:
             st.error(f"{failure['file']}: {failure['reason']}")
-        staging_dir = st.session_state.pop("batch_staging_dir", None)
-        if staging_dir:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        st.session_state.pop("batch_preview", None)
+        if report.retry_needed:
+            st.session_state.batch_preview = preview.for_retry(report.retry_needed)
+            st.session_state.batch_retry_mode = True
+        else:
+            staging_dir = st.session_state.pop("batch_staging_dir", None)
+            if staging_dir:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            st.session_state.pop("batch_preview", None)
+            st.session_state.pop("batch_retry_mode", None)
 
 
 # ============================================================

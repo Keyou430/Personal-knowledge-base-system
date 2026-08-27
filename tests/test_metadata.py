@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import core.metadata as metadata_module
 from core.document_store import DocumentStore
 from core.ingestion import ingest_file
 from core.metadata import (
@@ -155,6 +156,55 @@ def test_batch_execution_continues_after_changed_file_and_preserves_old_active(t
     assert report.failures[0]["reason"] == "文件在预览后发生变化"
     assert store.find_active("制度", "替换.md").id == old.id
     assert store.find_active("制度", "新增.md") is not None
+
+
+def test_batch_execution_continues_when_file_becomes_unreadable(tmp_path, monkeypatch):
+    store = DocumentStore(tmp_path / "documents.db")
+    unreadable = write_text(tmp_path / "不可读.md", "# 不可读\n内容")
+    readable = write_text(tmp_path / "可入库.md", "# 可入库\n内容")
+    preview = preview_batch(
+        [unreadable, readable],
+        domain="制度",
+        store=store,
+        category="制度",
+        owner="财务部",
+        source="upload",
+    )
+    original_sha256 = metadata_module._sha256
+
+    def fail_for_one(path):
+        if path == unreadable:
+            raise PermissionError("simulated unreadable file")
+        return original_sha256(path)
+
+    monkeypatch.setattr(metadata_module, "_sha256", fail_for_one)
+
+    report = execute_batch(preview, store=store, vectorstore=FakeVectorStore())
+
+    assert report.successes == ["可入库.md"]
+    assert report.retry_needed == ["不可读.md"]
+    assert report.failures[0]["file"] == "不可读.md"
+
+
+def test_batch_preview_can_be_reduced_to_retry_items(tmp_path):
+    store = DocumentStore(tmp_path / "documents.db")
+    accepted = write_text(tmp_path / "可入库.md", "# 可入库\n内容")
+    unsupported = write_text(tmp_path / "脚本.exe", "not supported")
+    preview = preview_batch(
+        [accepted, unsupported],
+        domain="制度",
+        store=store,
+        category="制度",
+        owner="财务部",
+        source="upload",
+    )
+
+    retry_preview = preview.for_retry(["脚本.exe"])
+    report = execute_batch(retry_preview, store=store, vectorstore=FakeVectorStore())
+
+    assert [item.name for item in retry_preview.items] == ["脚本.exe"]
+    assert report.retry_needed == ["脚本.exe"]
+    assert report.failures[0]["reason"] == "不支持的文件格式"
 
 
 def test_batch_execution_is_idempotent_and_commits_reviewed_metadata(tmp_path):
