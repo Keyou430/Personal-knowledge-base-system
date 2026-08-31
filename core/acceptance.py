@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import math
+import os
+import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -13,7 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, build_opener
 
 from core.backup import create_backup, restore_backup
 from core.document_store import DocumentStore
@@ -65,8 +71,18 @@ class AcceptanceReport:
         return tuple(
             check.name
             for check in self.checks
-            if check.status == "failed"
+            if check.status in {"failed", "error"}
         )
+
+    @property
+    def exit_code(self) -> int:
+        """Return the documented process code for the aggregate report."""
+        errors = [check for check in self.checks if check.status == "error"]
+        if errors:
+            return 3 if any((check.exit_code or 3) != 2 for check in errors) else 2
+        if any(check.status == "failed" for check in self.checks):
+            return 1
+        return 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +92,7 @@ class AcceptanceReport:
             "checks": [check.as_dict() for check in self.checks],
             "retry_needed": list(self.retry_needed),
             "failures": list(self.failures),
+            "exit_code": self.exit_code,
         }
 
 
@@ -112,6 +129,14 @@ def _run_command(
         )
 
 
+def _exit_code(value: Any) -> int:
+    try:
+        code = int(value)
+    except (TypeError, ValueError):
+        return 3
+    return code if code in {0, 1, 2, 3} else 3
+
+
 def _command_check(
     name: str,
     command: Sequence[str | Path],
@@ -125,7 +150,7 @@ def _command_check(
     started = time.perf_counter()
     result = runner(command, cwd, env)
     duration_ms = int((time.perf_counter() - started) * 1000)
-    exit_code = int(getattr(result, "returncode", 3))
+    exit_code = _exit_code(getattr(result, "returncode", 3))
     if exit_code == 0:
         return AcceptanceCheck(
             name=name,
@@ -134,53 +159,142 @@ def _command_check(
             exit_code=0,
             duration_ms=duration_ms,
         )
+    if advisory:
+        status = "warning"
+    elif exit_code == 1:
+        status = "failed"
+    else:
+        status = "error"
     return AcceptanceCheck(
         name=name,
-        status="warning" if advisory else "failed",
+        status=status,
         summary=("环境依赖检查存在未满足项" if advisory else "命令未通过"),
         exit_code=exit_code,
         duration_ms=duration_ms,
     )
 
 
-def _evaluation_check(report_path: Path) -> AcceptanceCheck:
-    if not report_path.is_file():
+_METRIC_NAMES = (
+    "hit_at_k",
+    "active_version_hit_rate",
+    "refusal_accuracy",
+    "citation_coverage",
+)
+_SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+
+
+def _safe_error_code(value: Any) -> str:
+    if isinstance(value, str) and _SAFE_ERROR_CODE.fullmatch(value):
+        return value
+    return "invalid_evaluation_report"
+
+
+def _metric_values(value: Any) -> dict[str, float] | None:
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, float] = {}
+    for name in _METRIC_NAMES:
+        raw = value.get(name)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        try:
+            number = float(raw)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+            return None
+        result[name] = number
+    return result
+
+
+def _evaluation_check(report_path: Path, *, evaluator_exit_code: int | None = None) -> AcceptanceCheck:
+    report_exists = report_path.is_file()
+    process_code = 0 if evaluator_exit_code is None and report_exists else _exit_code(evaluator_exit_code)
+    if not report_exists:
+        if process_code == 1:
+            status, summary, exit_code = "failed", "评测命令未生成质量报告", 1
+        elif process_code == 2:
+            status, summary, exit_code = "error", "评测输入配置或索引无效，未生成报告", 2
+        else:
+            status, summary, exit_code = "error", "评测命令异常，未生成报告", 3
         return AcceptanceCheck(
             name="offline_evaluation",
-            status="failed",
-            summary="评测命令未生成安全报告",
-            exit_code=3,
+            status=status,
+            summary=summary,
+            exit_code=exit_code,
         )
     try:
         payload = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return AcceptanceCheck(
             name="offline_evaluation",
-            status="failed",
+            status="error",
             summary="评测报告无法读取",
-            exit_code=3,
+            exit_code=process_code if process_code in {2, 3} else 3,
         )
     if not isinstance(payload, dict):
         return AcceptanceCheck(
             name="offline_evaluation",
-            status="failed",
+            status="error",
             summary="评测报告格式无效",
-            exit_code=3,
+            exit_code=process_code if process_code in {2, 3} else 3,
         )
-    metrics = payload.get("metrics")
     status = payload.get("status")
-    if status != "passed" or not isinstance(metrics, dict):
+    if status == "failed":
+        if process_code in {2, 3}:
+            return AcceptanceCheck(
+                name="offline_evaluation",
+                status="error",
+                summary="评测命令异常退出",
+                exit_code=process_code,
+            )
+        error_code = _safe_error_code(payload.get("error_code") or "quality_gate_failed")
         return AcceptanceCheck(
             name="offline_evaluation",
             status="failed",
-            summary=f"离线评测未通过: {str(payload.get('error_code') or 'quality_gate_failed')[:80]}",
+            summary=f"离线评测未通过: {error_code}",
             exit_code=1,
         )
-    metric_summary = ", ".join(
-        f"{key}={float(metrics[key]):.3f}"
-        for key in ("hit_at_k", "active_version_hit_rate", "refusal_accuracy", "citation_coverage")
-        if isinstance(metrics.get(key), (int, float))
-    )
+    if status == "error":
+        error_code = _safe_error_code(payload.get("error_code"))
+        return AcceptanceCheck(
+            name="offline_evaluation",
+            status="error",
+            summary=f"离线评测配置或运行错误: {error_code}",
+            exit_code=process_code if process_code in {2, 3} else 2,
+        )
+    if status != "passed":
+        return AcceptanceCheck(
+            name="offline_evaluation",
+            status="error",
+            summary="评测报告状态无效",
+            exit_code=3,
+        )
+    metrics = _metric_values(payload.get("metrics"))
+    thresholds = _metric_values(payload.get("thresholds"))
+    if metrics is None or thresholds is None:
+        return AcceptanceCheck(
+            name="offline_evaluation",
+            status="error",
+            summary="评测报告缺少完整且有限的指标或阈值",
+            exit_code=process_code if process_code in {2, 3} else 3,
+        )
+    if process_code != 0:
+        return AcceptanceCheck(
+            name="offline_evaluation",
+            status="failed" if process_code == 1 else "error",
+            summary="离线评测命令退出码异常",
+            exit_code=process_code,
+        )
+    regressions = [name for name in _METRIC_NAMES if metrics[name] + 1e-12 < thresholds[name]]
+    metric_summary = ", ".join(f"{key}={metrics[key]:.3f}" for key in _METRIC_NAMES)
+    if regressions:
+        return AcceptanceCheck(
+            name="offline_evaluation",
+            status="failed",
+            summary=f"离线评测指标未达到阈值: {', '.join(regressions)} ({metric_summary})",
+            exit_code=1,
+        )
     return AcceptanceCheck(
         name="offline_evaluation",
         status="passed",
@@ -256,10 +370,64 @@ def run_restore_rehearsal(root: str | Path) -> AcceptanceCheck:
         shutil.rmtree(workspace, ignore_errors=True)
 
 
+_LOCAL_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
+
+
+def _validate_streamlit_url(url: str) -> None:
+    if not isinstance(url, str) or len(url) > 2048:
+        raise ValueError("invalid URL")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+        raise ValueError("Streamlit 地址必须是 HTTP(S) 本地地址")
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("invalid URL") from error
+    if not hostname:
+        raise ValueError("Streamlit 地址缺少主机名")
+    normalized = hostname.rstrip(".").lower()
+    if normalized in _LOCAL_HOSTNAMES:
+        return
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(normalized, port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+        except OSError as error:
+            raise ValueError("Streamlit 地址必须解析到本地回环地址") from error
+        try:
+            loopback = bool(infos) and all(ipaddress.ip_address(info[4][0]).is_loopback for info in infos)
+        except ValueError as error:
+            raise ValueError("Streamlit 地址必须解析到本地回环地址") from error
+        if not loopback:
+            raise ValueError("Streamlit 地址必须解析到本地回环地址")
+        return
+    if not address.is_loopback:
+        raise ValueError("Streamlit 地址必须是本地回环地址")
+
+
+class _LocalOnlyRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_streamlit_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _streamlit_check(url: str) -> AcceptanceCheck:
     started = time.perf_counter()
     try:
-        with urlopen(url, timeout=10) as response:
+        _validate_streamlit_url(url)
+    except (ValueError, TypeError):
+        return AcceptanceCheck(
+            name="streamlit_health",
+            status="error",
+            summary="Streamlit 地址必须是本地 HTTP(S) 回环地址",
+            exit_code=2,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
+    try:
+        opener = build_opener(_LocalOnlyRedirectHandler())
+        with opener.open(url, timeout=10) as response:
             status = int(response.status)
         passed = status == 200
         return AcceptanceCheck(
@@ -269,7 +437,15 @@ def _streamlit_check(url: str) -> AcceptanceCheck:
             exit_code=0 if passed else 1,
             duration_ms=int((time.perf_counter() - started) * 1000),
         )
-    except (OSError, URLError, ValueError, TypeError):
+    except (ValueError, TypeError):
+        return AcceptanceCheck(
+            name="streamlit_health",
+            status="error",
+            summary="Streamlit 重定向目标必须是本地 HTTP(S) 回环地址",
+            exit_code=2,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
+    except (OSError, URLError):
         return AcceptanceCheck(
             name="streamlit_health",
             status="failed",
@@ -301,17 +477,28 @@ def run_acceptance_gate(
 
     started_at = _now()
     checks: list[AcceptanceCheck] = []
-    env = dict(__import__("os").environ)
     temp_root = root / ".pytest-tmp"
     temp_root.mkdir(parents=True, exist_ok=True)
-    env["TEMP"] = str(temp_root)
-    env["TMP"] = str(temp_root)
-    env["PYTHONPATH"] = str(root)
+    allowed_env = (
+        "PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "WINDIR", "ComSpec",
+        "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA",
+        "PROGRAMDATA", "ALLUSERSPROFILE", "PUBLIC",
+        "PYTHONHOME", "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONHASHSEED",
+        "VIRTUAL_ENV", "LANG", "LC_ALL",
+    )
+    env = {key: os.environ[key] for key in allowed_env if key in os.environ}
+    env.update({
+        "TEMP": str(temp_root),
+        "TMP": str(temp_root),
+        "PYTHONPATH": str(root),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    })
     if include_pytest:
         checks.append(
             _command_check(
                 "pytest",
-                [sys.executable, "-m", "pytest", "-q"],
+                [sys.executable, "-m", "pytest", "-q", "--basetemp", str(temp_root / "pytest-basetemp")],
                 cwd=root,
                 env=env,
                 runner=command_runner,
@@ -335,14 +522,10 @@ def run_acceptance_gate(
             evaluation_path,
         ]
         evaluation_result = command_runner(evaluation_command, root, env)
-        evaluation_check = _evaluation_check(evaluation_path)
-        if int(getattr(evaluation_result, "returncode", 3)) != 0 and evaluation_check.status == "passed":
-            evaluation_check = AcceptanceCheck(
-                name="offline_evaluation",
-                status="failed",
-                summary="离线评测命令退出码异常",
-                exit_code=int(getattr(evaluation_result, "returncode", 3)),
-            )
+        evaluation_check = _evaluation_check(
+            evaluation_path,
+            evaluator_exit_code=getattr(evaluation_result, "returncode", 3),
+        )
         checks.append(evaluation_check)
 
     checks.append(
@@ -371,7 +554,9 @@ def run_acceptance_gate(
     if streamlit_url:
         checks.append(_streamlit_check(streamlit_url))
 
-    status = "passed" if not any(check.status == "failed" for check in checks) else "failed"
+    status = "error" if any(check.status == "error" for check in checks) else (
+        "failed" if any(check.status == "failed" for check in checks) else "passed"
+    )
     return AcceptanceReport(
         status=status,
         started_at=started_at,
@@ -381,7 +566,7 @@ def run_acceptance_gate(
 
 
 def render_text_report(report: AcceptanceReport) -> str:
-    lines = [f"P1 验收门禁: {report.status}"]
+    lines = [f"P1 验收门禁: {report.status} (exit_code={report.exit_code})"]
     for check in report.checks:
         suffix = f"; retry_needed={','.join(check.retry_needed)}" if check.retry_needed else ""
         lines.append(f"- {check.name}: {check.status} - {check.summary}{suffix}")
@@ -417,7 +602,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         _write_json(args.json_out, report)
         print(render_text_report(report))
-        return 0 if report.status == "passed" else 1
+        return report.exit_code
     except AcceptanceConfigError:
         return 2
     except Exception:

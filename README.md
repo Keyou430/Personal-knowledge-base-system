@@ -84,6 +84,8 @@ python -m core.evaluation --mode live --cases data/evaluation/cases.json --datab
 
 P1 交付前可运行一次总验收，统一检查自动化测试、公开离线评测、Python 编译、临时数据备份/恢复/关键词索引重建，以及指定 Streamlit 服务的健康状态：
 
+下面的示例使用 `8502`。请先在另一个终端以 `streamlit run app.py --server.port 8502` 启动；如果按默认命令使用 `8501`，将健康检查 URL 中的端口改为 `8501`。该自动检查只确认 Streamlit 进程健康，应用页面和业务流程仍需按后文手工清单确认。
+
 ```powershell
 python -m core.acceptance --project-root . `
   --cases tests/fixtures/evaluation_cases.json `
@@ -92,7 +94,7 @@ python -m core.acceptance --project-root . `
   --json-out data/evaluation/p1-acceptance.json
 ```
 
-报告只保存检查名称、状态、耗时、指标摘要和重试清单，不保存问题、答案、原始片段、完整路径或 API Key。`dependency_check` 在工作站存在无关包缺失时显示为 warning，不阻断本地 P1 门禁；其他检查失败会返回退出码 `1`。运行前请按后文手工清单验证上传、迁移、拒答、引用、经验保存和索引重建。
+报告只保存检查名称、状态、耗时、指标摘要和重试清单，不保存问题、答案、原始片段、完整路径或 API Key。`dependency_check` 在工作站存在无关包缺失时显示为 warning，不阻断本地 P1 门禁；退出码 `1` 表示质量门禁失败，`2` 表示验收配置错误，`3` 表示未捕获异常。运行前请按后文手工清单验证上传、迁移、拒答、引用、经验保存和索引重建。
 
 ## 🧠 经验沉淀流程
 
