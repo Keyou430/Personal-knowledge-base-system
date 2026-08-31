@@ -80,6 +80,20 @@ python -m core.evaluation --mode live --cases data/evaluation/cases.json --datab
 
 退出码 `0` 表示通过，`1` 表示质量指标低于阈值，`2` 表示案例、索引或基线配置错误，`3` 表示未捕获异常。报告只包含案例 ID、指标和安全失败原因，不输出问题原文、召回片段或密钥。
 
+## ✅ P1 总验收门禁
+
+P1 交付前可运行一次总验收，统一检查自动化测试、公开离线评测、Python 编译、临时数据备份/恢复/关键词索引重建，以及指定 Streamlit 服务的健康状态：
+
+```powershell
+python -m core.acceptance --project-root . `
+  --cases tests/fixtures/evaluation_cases.json `
+  --corpus tests/fixtures/evaluation_corpus.json `
+  --streamlit-url http://localhost:8502/_stcore/health `
+  --json-out data/evaluation/p1-acceptance.json
+```
+
+报告只保存检查名称、状态、耗时、指标摘要和重试清单，不保存问题、答案、原始片段、完整路径或 API Key。`dependency_check` 在工作站存在无关包缺失时显示为 warning，不阻断本地 P1 门禁；其他检查失败会返回退出码 `1`。运行前请按后文手工清单验证上传、迁移、拒答、引用、经验保存和索引重建。
+
 ## 🧠 经验沉淀流程
 
 1. 在问答结果下点击 **“沉淀为经验”**，确认发送当前问题、回答和选定引用片段。
@@ -106,6 +120,7 @@ python -m core.evaluation --mode live --cases data/evaluation/cases.json --datab
 │   ├── hybrid_retriever.py # 混合检索与相关度门槛
 │   ├── migration.py    # 显式迁移与索引重建
 │   ├── backup.py       # 清单校验、备份与恢复
+│   ├── acceptance.py    # P1 总验收门禁与安全证据
 │   ├── embedder.py     # Embedding 模型
 │   ├── retriever.py    # 向量检索
 │   ├── generator.py    # LLM 生成
