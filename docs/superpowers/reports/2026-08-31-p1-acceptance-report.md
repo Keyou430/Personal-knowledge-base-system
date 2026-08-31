@@ -1,7 +1,9 @@
 # P1 本地知识库总验收记录
 
 日期：2026-08-31
-提交：`b4c3f78`
+提交：`42bb431`
+
+说明：本报告命令使用 `8502`。运行前请执行 `streamlit run app.py --server.port 8502`；若使用默认 `8501`，请同步修改 `--streamlit-url` 的端口。
 
 ## 自动验收结果
 
@@ -22,7 +24,7 @@ python -m core.acceptance --project-root . `
 | Python 编译 | passed | `compileall` 通过 |
 | 依赖检查 | warning | 工作站全局环境存在与项目无关的缺失包，不阻断门禁 |
 | 恢复演练 | passed | 临时数据备份、SHA-256 校验、恢复和 FTS 重建通过 |
-| Streamlit 健康 | passed | `http://localhost:8502/_stcore/health` 返回 200 |
+| Streamlit 进程健康 | passed | `http://localhost:8502/_stcore/health` 返回 200；页面和业务流程另有手工确认 |
 
 总状态：`passed`。重试清单为空。
 
