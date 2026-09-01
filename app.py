@@ -164,6 +164,7 @@ def _source_payload(doc) -> dict:
     record = get_document_store().get(doc.document_id) if doc.document_id else None
     status = record.status if record else "unknown"
     index_pending = bool(record.index_pending) if record else False
+    source_present = bool(record.source_present) if record else True
     return {
         "source": doc.document_name,
         "document_id": doc.document_id,
@@ -173,8 +174,9 @@ def _source_payload(doc) -> dict:
         "page": doc.page,
         "score": doc.score,
         "status": status,
-        "status_label": document_status_label(status, index_pending),
+        "status_label": document_status_label(status, index_pending, source_present),
         "index_pending": index_pending,
+        "source_present": source_present,
     }
 
 
@@ -486,6 +488,7 @@ def render_browse_section():
         "索引健康："
         f"{health['status']} · 当前生效 {health['active']} · 历史版本 {health['superseded']} · "
         f"失败 {health['failed']} · 待重建 {health['index_pending']}"
+        f" · 源文件缺失 {health['source_missing']}"
     )
 
     # 获取领域内的文件列表
@@ -563,7 +566,7 @@ def render_browse_section():
             with col2:
                 record = records_by_name.get(file_info["name"])
                 status = (
-                    document_status_label(record.status, record.index_pending)
+                    document_status_label(record.status, record.index_pending, record.source_present)
                     if record
                     else "未入库"
                 )

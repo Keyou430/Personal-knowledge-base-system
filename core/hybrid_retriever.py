@@ -74,7 +74,7 @@ class HybridRetriever:
             document_id = item["document_id"]
             if document_id:
                 document = self.store.get(document_id)
-                if document is None or document.status != "active":
+                if document is None or document.status != "active" or not document.source_present:
                     continue
             current = merged.setdefault(
                 chunk_id,

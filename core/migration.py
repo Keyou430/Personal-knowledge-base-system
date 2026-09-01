@@ -91,6 +91,8 @@ def rebuild_indexes(
     if domains:
         documents = [document for document in documents if document.domain in domains]
     for document in documents:
+        if not document.source_present:
+            continue
         try:
             chunks = store.get_chunks(document.id)
             if not chunks:

@@ -109,3 +109,24 @@ def test_rebuild_one_domain_preserves_other_keyword_projections(tmp_path):
         assert connection.execute(
             "SELECT COUNT(*) FROM document_chunks_fts WHERE domain = ?", ("编程",)
         ).fetchone()[0] > 0
+
+
+def test_rebuild_skips_documents_with_missing_sources(tmp_path):
+    store = DocumentStore(tmp_path / "documents.db")
+    source = tmp_path / "制度.md"
+    source.write_text("# 报销\n提交发票。", encoding="utf-8")
+    vectorstore = FakeVectorStore()
+    migrate_domain("制度", raw_dir=tmp_path, store=store, vectorstore=vectorstore)
+    document = store.find_active("制度", "制度.md")
+    assert document is not None
+    store.mark_source_present(document.id, False)
+    vectorstore.added.clear()
+
+    report = rebuild_indexes(store=store, vectorstore=vectorstore, domains=["制度"])
+
+    assert report.success_count == 0
+    assert report.failure_count == 0
+    assert report.recovered == []
+    assert report.missing == []
+    assert report.retry_needed == []
+    assert vectorstore.added == {}

@@ -76,3 +76,18 @@ def test_hybrid_retriever_filters_inactive_semantic_versions_and_low_scores(tmp_
 
     assert HybridRetriever(store, semantic_search, min_score=0.99).search("无关", "制度") == []
     assert HybridRetriever(store, semantic_search, min_score=0.0).search("BX-2026-01", "制度") == []
+
+
+def test_hybrid_retriever_filters_semantic_results_with_missing_source(tmp_path):
+    store, doc = seed_store(tmp_path)
+    store.mark_source_present(doc.id, False)
+
+    def semantic_search(query, domain, top_k):
+        return [
+            Document(
+                page_content="报销编号 BX-2026-01。",
+                metadata={"chunk_id": "chunk-keyword", "document_id": doc.id, "document_version": doc.version},
+            )
+        ]
+
+    assert HybridRetriever(store, semantic_search, min_score=0.0).search("BX-2026-01", "制度") == []

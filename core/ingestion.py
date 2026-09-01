@@ -86,6 +86,10 @@ def ingest_file(
     source: str = "upload",
     version: str | None = None,
     updated_at: str | None = None,
+    document_name: str | None = None,
+    archive_relative_path: str | Path | None = None,
+    deduplicate_by_hash: bool = True,
+    source_present: bool = True,
 ) -> IngestionResult:
     """Load, archive, and project one file; SQLite remains readable on projection failure."""
     source_path = Path(path)
@@ -103,10 +107,13 @@ def ingest_file(
     )
 
     content, chunk_records = prepare_document(source_path)
-    name = source_path.name
+    name = document_name or source_path.name
+    relative_name = Path(name)
+    if relative_name.is_absolute() or ".." in relative_name.parts:
+        raise ValueError("文档名称必须是相对路径")
     existing = store.find_active(domain, name)
     content_hash = store.content_hash(content)
-    same = store.find_by_hash(domain, content_hash)
+    same = store.find_by_hash(domain, content_hash) if deduplicate_by_hash else None
     if same is not None:
         return IngestionResult(
             document=same,
@@ -129,6 +136,8 @@ def ingest_file(
             chunks=chunk_records,
             version=metadata.version,
             updated_at=metadata.updated_at,
+            deduplicate_by_hash=deduplicate_by_hash,
+            source_present=source_present,
         )
     else:
         document = store.create_document(
@@ -141,9 +150,14 @@ def ingest_file(
             chunks=chunk_records,
             version=metadata.version,
             updated_at=metadata.updated_at,
+            deduplicate_by_hash=deduplicate_by_hash,
+            source_present=source_present,
         )
 
-    raw_path = store.database_path.parent / "raw" / domain / source_path.name
+    archive_path = Path(archive_relative_path) if archive_relative_path is not None else relative_name
+    if archive_path.is_absolute() or ".." in archive_path.parts:
+        raise ValueError("归档路径必须是相对路径")
+    raw_path = store.database_path.parent / "raw" / domain / archive_path
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     if source_path.resolve() != raw_path.resolve():
         with tempfile.NamedTemporaryFile(

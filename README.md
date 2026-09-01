@@ -62,6 +62,18 @@ streamlit run app.py
 
 批量上传采用“生成预览 -> 人工确认 -> 逐项入库”流程。预览阶段不写数据库；同批重复、已入库重复、同名新版本、不支持格式和解析失败会分别标出。确认后每个文件独立处理，失败项不会阻塞其他文件，并会列入重试清单。
 
+本地目录增量同步提供同样的预览优先边界。默认只扫描并输出计划，不写入档案；显式加入 `--apply` 才会应用新增和变更。源文件删除或改名不会删除知识库，只标记“源文件缺失”；Embedding 失败时保留 FTS 关键词检索，并在文档浏览页提示点击“重建知识索引”。
+
+```powershell
+# 只预览，不写入
+python -m core.directory_sync --source D:\KnowledgeSource --domain 默认
+
+# 显式应用，适合由 Windows Task Scheduler 调用
+python -m core.directory_sync --source D:\KnowledgeSource --domain 默认 --apply
+```
+
+可用 `--database` 指定 SQLite 文件，`--json-out` 保存本次报告，`--log-file` 追加 JSONL 运行日志，`--lock-file` 指定运行锁。退出码 `0` 表示扫描/应用完成；`1` 表示解析、快照变化或逐文件应用失败；`2` 表示参数、源目录、数据库或锁配置错误；`3` 表示未捕获异常。`missing` 和 `unsupported` 只进入报告，不单独触发非零退出码。
+
 备份与恢复也在“文档浏览”页完成。创建备份时请选择一个空目录；恢复时填写明确的来源目录和目标目录，目标非空还要勾选覆盖确认。系统会先完整校验备份清单，校验失败不会触碰恢复目标。重建索引后页面会列出已恢复、缺失切片和需要重试的文档。
 
 ## 🧪 离线 RAG 评测
@@ -121,6 +133,7 @@ python -m core.acceptance --project-root . `
 │   ├── metadata.py     # 元数据规范、批量预览与逐项入库
 │   ├── hybrid_retriever.py # 混合检索与相关度门槛
 │   ├── migration.py    # 显式迁移与索引重建
+│   ├── directory_sync.py # 本地目录增量同步 CLI
 │   ├── backup.py       # 清单校验、备份与恢复
 │   ├── acceptance.py    # P1 总验收门禁与安全证据
 │   ├── embedder.py     # Embedding 模型

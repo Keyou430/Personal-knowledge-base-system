@@ -73,8 +73,12 @@ def test_index_health_distinguishes_active_superseded_failed_and_pending(tmp_pat
     assert health["superseded"] == 1
     assert health["failed"] == 1
     assert health["index_pending"] == 1
+    store.mark_source_present(active.id, False)
+    health = get_index_health(store, "制度")
+    assert health["source_missing"] == 1
     assert health["status"] == "attention"
     assert document_status_label("active", False) == "当前生效"
     assert document_status_label("superseded", False) == "历史版本"
     assert document_status_label("failed", False) == "处理失败"
     assert document_status_label("active", True) == "待重建索引"
+    assert document_status_label("active", False, False) == "源文件缺失"

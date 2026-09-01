@@ -63,6 +63,7 @@ class DocumentRecord:
     status: str
     index_pending: bool
     created_at: str
+    source_present: bool = True
 
 
 @dataclass(frozen=True)
@@ -115,12 +116,30 @@ class DocumentStore:
                     updated_at TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     status TEXT NOT NULL CHECK(status IN ('active', 'superseded', 'failed')),
-                    index_pending INTEGER NOT NULL DEFAULT 0
+                    index_pending INTEGER NOT NULL DEFAULT 0,
+                    source_present INTEGER NOT NULL DEFAULT 1
                 );
                 CREATE INDEX IF NOT EXISTS idx_documents_domain_name
                     ON documents(domain, name, status);
                 CREATE INDEX IF NOT EXISTS idx_documents_hash
                     ON documents(domain, content_hash, status);
+
+                CREATE TABLE IF NOT EXISTS directory_sync_sources (
+                    root_key TEXT NOT NULL,
+                    domain TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    document_id TEXT,
+                    file_sha256 TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    modified_ns INTEGER NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('present', 'missing')),
+                    last_seen_at TEXT NOT NULL,
+                    last_applied_at TEXT,
+                    PRIMARY KEY(root_key, domain, relative_path),
+                    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE SET NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_directory_sync_document
+                    ON directory_sync_sources(document_id);
 
                 CREATE TABLE IF NOT EXISTS document_chunks (
                     id TEXT PRIMARY KEY,
@@ -146,6 +165,11 @@ class DocumentStore:
                 );
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)").fetchall()}
+            if "source_present" not in columns:
+                connection.execute(
+                    "ALTER TABLE documents ADD COLUMN source_present INTEGER NOT NULL DEFAULT 1"
+                )
 
     def create_document(
         self,
@@ -159,9 +183,11 @@ class DocumentStore:
         chunks: Iterable[ChunkRecord],
         version: str | None = None,
         updated_at: str | None = None,
+        deduplicate_by_hash: bool = True,
+        source_present: bool = True,
     ) -> DocumentRecord:
         content_hash = _hash_content(content)
-        existing = self.find_by_hash(domain, content_hash)
+        existing = self.find_by_hash(domain, content_hash) if deduplicate_by_hash else None
         if existing is not None:
             return existing
 
@@ -177,6 +203,7 @@ class DocumentStore:
             version=resolved_version,
             chunks=list(chunks),
             updated_at=updated_at,
+            source_present=source_present,
         )
 
     def replace_document(
@@ -192,9 +219,11 @@ class DocumentStore:
         chunks: Iterable[ChunkRecord],
         version: str | None = None,
         updated_at: str | None = None,
+        deduplicate_by_hash: bool = True,
+        source_present: bool = True,
     ) -> DocumentRecord:
         content_hash = _hash_content(content)
-        existing = self.find_by_hash(domain, content_hash)
+        existing = self.find_by_hash(domain, content_hash) if deduplicate_by_hash else None
         if existing is not None:
             return existing
         current = self.get(document_id)
@@ -217,6 +246,7 @@ class DocumentStore:
                 version=resolved_version,
                 chunks=list(chunks),
                 updated_at=updated_at,
+                source_present=source_present,
             )
         except Exception:
             # Projection rows are transactional, and the previous active
@@ -240,6 +270,7 @@ class DocumentStore:
         version: str,
         chunks: list[ChunkRecord],
         updated_at: str | None = None,
+        source_present: bool = True,
     ) -> DocumentRecord:
         if not chunks:
             raise ValueError("文档切片不能为空")
@@ -252,7 +283,8 @@ class DocumentStore:
                 INSERT INTO documents (
                     id, domain, name, category, owner, version, content_hash,
                     source, updated_at, created_at, status, index_pending
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0)
+                    , source_present
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?)
                 """,
                 (
                     document_id,
@@ -265,6 +297,7 @@ class DocumentStore:
                     source,
                     timestamp,
                     timestamp,
+                    int(source_present),
                 ),
             )
             for index, chunk in enumerate(chunks):
@@ -408,7 +441,7 @@ class DocumentStore:
             FROM document_chunks_fts f
             JOIN document_chunks c ON c.id = f.chunk_id
             JOIN documents d ON d.id = c.document_id
-            WHERE document_chunks_fts MATCH ? AND d.status = 'active'
+            WHERE document_chunks_fts MATCH ? AND d.status = 'active' AND d.source_present = 1
         """
         params: list[Any] = [match_query]
         if domain:
@@ -429,7 +462,7 @@ class DocumentStore:
                            c.metadata_json, 0.0 AS rank
                     FROM document_chunks c
                     JOIN documents d ON d.id = c.document_id
-                    WHERE d.status = 'active'
+                    WHERE d.status = 'active' AND d.source_present = 1
                 """
                 like_params: list[Any] = []
                 for term in terms:
@@ -468,6 +501,61 @@ class DocumentStore:
             if result.rowcount != 1:
                 raise KeyError(f"文档不存在: {document_id}")
 
+    def mark_source_present(self, document_id: str, present: bool) -> None:
+        with self._connect() as connection:
+            result = connection.execute(
+                "UPDATE documents SET source_present = ? WHERE id = ?",
+                (int(bool(present)), document_id),
+            )
+            if result.rowcount != 1:
+                raise KeyError(f"文档不存在: {document_id}")
+
+    def upsert_sync_source(
+        self,
+        *,
+        root_key: str,
+        domain: str,
+        relative_path: str,
+        document_id: str | None,
+        file_sha256: str,
+        size: int,
+        modified_ns: int,
+        state: str,
+        last_seen_at: str,
+        last_applied_at: str | None,
+    ) -> None:
+        if state not in {"present", "missing"}:
+            raise ValueError("同步来源状态无效")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO directory_sync_sources (
+                    root_key, domain, relative_path, document_id, file_sha256,
+                    size, modified_ns, state, last_seen_at, last_applied_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(root_key, domain, relative_path) DO UPDATE SET
+                    document_id=excluded.document_id,
+                    file_sha256=excluded.file_sha256,
+                    size=excluded.size,
+                    modified_ns=excluded.modified_ns,
+                    state=excluded.state,
+                    last_seen_at=excluded.last_seen_at,
+                    last_applied_at=excluded.last_applied_at
+                """,
+                (
+                    root_key, domain, relative_path, document_id, file_sha256,
+                    int(size), int(modified_ns), state, last_seen_at, last_applied_at,
+                ),
+            )
+
+    def list_sync_sources(self, *, root_key: str, domain: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM directory_sync_sources WHERE root_key = ? AND domain = ? ORDER BY relative_path",
+                (root_key, domain),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def rebuild_fts(self, domains: Iterable[str] | None = None) -> int:
         """Recreate the keyword projection from active archive rows."""
         with self._connect() as connection:
@@ -484,7 +572,7 @@ class DocumentStore:
                 INSERT INTO document_chunks_fts (chunk_id, domain, document_name, category, section_title, content)
                 SELECT c.id, d.domain, d.name, d.category, c.section_title, c.content
                 FROM document_chunks c JOIN documents d ON d.id = c.document_id
-                WHERE d.status = 'active'
+                WHERE d.status = 'active' AND d.source_present = 1
             """
             params: list[Any] = []
             if domain_list:
@@ -509,6 +597,7 @@ class DocumentStore:
             status=row["status"],
             index_pending=bool(row["index_pending"]),
             created_at=row["created_at"],
+            source_present=bool(row["source_present"]) if "source_present" in row.keys() else True,
         )
 
     @staticmethod

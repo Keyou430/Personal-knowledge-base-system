@@ -156,8 +156,9 @@ def get_index_health(store: DocumentStore, domain: str | None = None) -> dict[st
         "superseded": sum(document.status == "superseded" for document in documents),
         "failed": sum(document.status == "failed" for document in documents),
         "index_pending": sum(document.index_pending for document in documents),
+        "source_missing": sum(not document.source_present for document in documents),
     }
-    if counts["failed"] or counts["index_pending"]:
+    if counts["failed"] or counts["index_pending"] or counts["source_missing"]:
         status = "attention"
     elif counts["active"]:
         status = "healthy"
@@ -166,7 +167,11 @@ def get_index_health(store: DocumentStore, domain: str | None = None) -> dict[st
     return {**counts, "total": len(documents), "status": status}
 
 
-def document_status_label(status: str, index_pending: bool = False) -> str:
+def document_status_label(
+    status: str, index_pending: bool = False, source_present: bool = True
+) -> str:
+    if not source_present:
+        return "源文件缺失"
     if index_pending:
         return "待重建索引"
     return {
